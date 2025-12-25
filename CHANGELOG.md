@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - 2024-12-25
+## [1.3.0] - 2025-12-25
 
 ### Added
 
@@ -91,7 +91,7 @@ CORRELATION_CHECK_INTERVAL=120
 
 ---
 
-## [1.2.0] - 2024-12-22
+## [1.2.0] - 2025-12-22
 
 ### Fixed
 - **CRITICAL: Rspamd-Postfix Correlation**
@@ -112,7 +112,7 @@ CORRELATION_CHECK_INTERVAL=120
 - Correlation found/created with that Queue-ID
 - Ensures Rspamd and Postfix logs are properly linked
 
-## [1.1.1] - 2024-12-22
+## [1.1.1] - 2025-12-22
 
 ### Fixed
 - **CRITICAL: Correlation Logic Completely Rewritten**
@@ -131,7 +131,7 @@ CORRELATION_CHECK_INTERVAL=120
 - New: Queue-ID → Message-ID (fallback) → sender+recipient+time (fallback)
 - Reason: Queue-ID is the definitive Postfix identifier for a message
 
-## [1.1.0] - 2024-12-22
+## [1.1.0] - 2025-12-22
 
 ### Fixed
 - **Duplicate Message Entries**: Single emails no longer appear multiple times in Messages view
@@ -156,7 +156,7 @@ CORRELATION_CHECK_INTERVAL=120
 - Improved query performance due to fewer duplicate records
 - No ongoing performance penalty
 
-## [1.0.0] - 2024-12-17
+## [1.0.0] - 2025-12-17
 
 ### Added
 - Initial release of Mailcow Logs Viewer
