@@ -63,6 +63,7 @@ A modern, self-hosted dashboard for viewing and analyzing Mailcow mail server lo
 - Expired correlations counter
 
 ### ⚙️ Additional
+- 🔐 Built-in HTTP Basic Authentication
 - 🌙 Dark mode
 - 📱 Responsive design
 - 🔄 Auto-refresh
@@ -123,6 +124,9 @@ All settings via environment variables. See **[env.example](env.example)** for f
 | `RETENTION_DAYS` | `7` | Days to keep logs |
 | `BLACKLIST_EMAILS` | (empty) | Emails to hide from display |
 | `TZ` | `UTC` | Timezone |
+| `AUTH_ENABLED` | `false` | Enable HTTP Basic Authentication |
+| `AUTH_USERNAME` | `admin` | Authentication username |
+| `AUTH_PASSWORD` | (empty) | Authentication password (required if enabled) |
 
 ---
 
@@ -174,9 +178,32 @@ Currently, there is no rate limiting implemented. For production deployments, co
 
 ## Authentication
 
-Currently, no authentication is required. For production deployments, consider:
-- Adding basic authentication via reverse proxy
-- Using OAuth2/OIDC
+The application supports built-in HTTP Basic Authentication to protect all pages and API endpoints.
+
+### Enabling Authentication
+
+Add the following to your `.env` file:
+
+```env
+AUTH_ENABLED=true
+AUTH_USERNAME=your_username
+AUTH_PASSWORD=your_secure_password
+```
+
+### How It Works
+
+- When authentication is enabled, all pages and API endpoints require valid credentials
+- Users are redirected to a dedicated login page (`/login`) if not authenticated
+- Credentials are stored in browser session storage (cleared when browser closes)
+- The main application page is only accessible after successful authentication
+- All API requests automatically include authentication headers
+
+### Security Notes
+
+- Use strong passwords in production
+- Credentials are transmitted using HTTP Basic Auth (Base64 encoded)
+- For production deployments over the internet, use HTTPS
+- Consider using a reverse proxy with additional security layers (rate limiting, IP whitelisting, etc.)
 
 ---
 

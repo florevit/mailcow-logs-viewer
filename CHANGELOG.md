@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2025-12-31
+
+### Added
+
+#### Security
+- **Built-in HTTP Basic Authentication**: Optional authentication system to protect all pages and API endpoints
+  - Dedicated login page (`/login`) with modern UI and dark mode support
+  - Credentials stored in browser session storage (cleared on browser close)
+  - Automatic redirect to login when authentication required
+  - All API endpoints protected when authentication is enabled
+  - Health check endpoint (`/api/health`) remains accessible for Docker monitoring
+  - Logout functionality with automatic redirect to login
+- **Authentication Configuration**: New environment variables:
+  - `AUTH_ENABLED` (default: false) - Enable/disable authentication
+  - `AUTH_USERNAME` (default: admin) - Authentication username
+  - `AUTH_PASSWORD` (required if enabled) - Authentication password
+- **Settings Page Enhancement**: Authentication status now displayed in Settings page with visual indicator (enabled/disabled badge)
+
+### Changed
+
+#### Documentation
+- Updated README.md with comprehensive authentication documentation
+- Updated GETTING_STARTED.md with authentication setup instructions
+- Added authentication information to Settings page display
+
+### Fixed
+
+#### Infrastructure
+- **Docker Healthcheck**: Health check endpoint now accessible without authentication to allow Docker health monitoring
+- **Multi-Platform Docker Images**: Docker images now support both AMD64 and ARM64 architectures
+  - Images automatically work on Raspberry Pi and other ARM-based devices
+
+### Technical
+
+#### New Configuration Options
+```env
+# Authentication (optional)
+AUTH_ENABLED=false
+AUTH_USERNAME=admin
+AUTH_PASSWORD=
+```
+
+#### API Changes
+- `GET /login` - New login page endpoint (public access)
+- `GET /api/settings/info` - Now returns authentication status and username
+
+#### Frontend Changes
+- Created dedicated `login.html` page with authentication form
+- Added authentication state management in JavaScript
+- All API calls now use `authenticatedFetch()` wrapper
+- Automatic redirect to login page when authentication required
+- Logout functionality redirects to login page
+- Login page supports dark mode with automatic theme detection
+
+#### Backend Changes
+- Added `BasicAuthMiddleware` for global authentication enforcement
+- Created `/login` endpoint for login page
+- Modified root endpoint to allow access (JavaScript handles redirect)
+- Health check endpoint excluded from authentication requirements
+
+#### Infrastructure Changes
+- **GitHub Actions Workflow**: Updated Docker build to support multi-platform (linux/amd64, linux/arm64)
+- **Docker Image Tagging**: Simplified tagging strategy - only `latest` and version tags (removed `main` tag)
+- Docker images now built for both x86_64 and ARM64 architectures simultaneously
+
+---
+
 ## [1.3.0] - 2025-12-25
 
 ### Added

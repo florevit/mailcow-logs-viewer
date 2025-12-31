@@ -3,6 +3,174 @@
 // Part 1: Core, Global State, Dashboard, Postfix, Rspamd, Netfilter
 // =============================================================================
 
+// =============================================================================
+// AUTHENTICATION SYSTEM
+// =============================================================================
+
+// Authentication state
+let authCredentials = null;
+
+// Load saved credentials from sessionStorage
+function loadAuthCredentials() {
+    try {
+        const saved = sessionStorage.getItem('auth_credentials');
+        if (saved) {
+            authCredentials = JSON.parse(saved);
+        }
+    } catch (e) {
+        console.error('Failed to load auth credentials:', e);
+        authCredentials = null;
+    }
+}
+
+// Save credentials to sessionStorage
+function saveAuthCredentials(username, password) {
+    try {
+        authCredentials = { username, password };
+        sessionStorage.setItem('auth_credentials', JSON.stringify(authCredentials));
+    } catch (e) {
+        console.error('Failed to save auth credentials:', e);
+    }
+}
+
+// Clear credentials
+function clearAuthCredentials() {
+    authCredentials = null;
+    try {
+        sessionStorage.removeItem('auth_credentials');
+    } catch (e) {
+        console.error('Failed to clear auth credentials:', e);
+    }
+}
+
+// Create Basic Auth header
+function getAuthHeader() {
+    if (!authCredentials) return {};
+    const credentials = btoa(`${authCredentials.username}:${authCredentials.password}`);
+    return {
+        'Authorization': `Basic ${credentials}`
+    };
+}
+
+// Enhanced fetch with authentication
+async function authenticatedFetch(url, options = {}) {
+    const headers = {
+        ...options.headers,
+        ...getAuthHeader()
+    };
+    
+    const response = await fetch(url, {
+        ...options,
+        headers
+    });
+    
+    // Handle 401 Unauthorized
+    if (response.status === 401) {
+        clearAuthCredentials();
+        showLoginModal();
+        throw new Error('Authentication required');
+    }
+    
+    return response;
+}
+
+// Handle login form submission (not used in main app, only in login.html)
+async function handleLogin(event) {
+    event.preventDefault();
+    
+    const username = document.getElementById('login-username').value;
+    const password = document.getElementById('login-password').value;
+    const errorDiv = document.getElementById('login-error');
+    const errorText = document.getElementById('login-error-text');
+    const submitBtn = document.getElementById('login-submit');
+    const submitText = document.getElementById('login-submit-text');
+    const submitLoading = document.getElementById('login-submit-loading');
+    
+    // Hide error
+    if (errorDiv) errorDiv.classList.add('hidden');
+    
+    // Show loading
+    if (submitText) submitText.classList.add('hidden');
+    if (submitLoading) submitLoading.classList.remove('hidden');
+    if (submitBtn) submitBtn.disabled = true;
+    
+    try {
+        // Save credentials
+        saveAuthCredentials(username, password);
+        
+        // Test authentication with a simple API call
+        const response = await authenticatedFetch('/api/info');
+        
+        if (response.ok) {
+            // Success - redirect to main app
+            window.location.href = '/';
+        } else {
+            throw new Error('Authentication failed');
+        }
+    } catch (error) {
+        // Show error
+        if (errorDiv) {
+            errorDiv.classList.remove('hidden');
+            if (errorText) {
+                errorText.textContent = error.message || 'Invalid username or password';
+            }
+        }
+        
+        // Clear password field
+        const passwordField = document.getElementById('login-password');
+        if (passwordField) passwordField.value = '';
+        
+        // Clear credentials
+        clearAuthCredentials();
+    } finally {
+        // Hide loading
+        if (submitText) submitText.classList.remove('hidden');
+        if (submitLoading) submitLoading.classList.add('hidden');
+        if (submitBtn) submitBtn.disabled = false;
+    }
+}
+
+// Handle logout
+function handleLogout() {
+    clearAuthCredentials();
+    // Redirect to login page
+    window.location.href = '/login';
+}
+
+// Check authentication on page load
+async function checkAuthentication() {
+    loadAuthCredentials();
+    
+    if (!authCredentials) {
+        // No credentials saved, redirect to login
+        window.location.href = '/login';
+        return false;
+    }
+    
+    try {
+        // Test if credentials are still valid
+        const response = await authenticatedFetch('/api/info');
+        if (response.ok) {
+            // Show logout button if auth is enabled
+            const logoutBtn = document.getElementById('logout-btn');
+            if (logoutBtn) logoutBtn.classList.remove('hidden');
+            return true;
+        } else {
+            // Invalid credentials, redirect to login
+            window.location.href = '/login';
+            return false;
+        }
+    } catch (error) {
+        // Authentication error, redirect to login
+        window.location.href = '/login';
+        return false;
+    }
+}
+
+// =============================================================================
+// EXISTING CODE CONTINUES...
+// =============================================================================
+
 // Global state
 let currentTab = 'dashboard';
 let currentPage = {
@@ -28,8 +196,15 @@ const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
 let autoRefreshTimer = null;
 
 // Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     console.log('=== Mailcow Logs Viewer Initializing ===');
+    
+    // Check authentication first
+    const isAuthenticated = await checkAuthentication();
+    if (!isAuthenticated) {
+        console.log('Authentication required - showing login modal');
+        return;
+    }
     
     // Check if all required elements exist
     const requiredElements = [
@@ -65,7 +240,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function loadAppInfo() {
     try {
-        const response = await fetch('/api/info');
+        const response = await authenticatedFetch('/api/info');
         const data = await response.json();
         
         if (data.app_title) {
@@ -182,7 +357,7 @@ async function smartRefreshMessages() {
     if (filters.direction) params.append('direction', filters.direction);
     if (filters.user) params.append('user', filters.user);
     
-    const response = await fetch(`/api/messages?${params}`);
+    const response = await authenticatedFetch(`/api/messages?${params}`);
     if (!response.ok) return;
     
     const data = await response.json();
@@ -250,7 +425,7 @@ async function smartRefreshNetfilter() {
         ...filters
     });
     
-    const response = await fetch(`/api/logs/netfilter?${params}`);
+    const response = await authenticatedFetch(`/api/logs/netfilter?${params}`);
     if (!response.ok) return;
     
     const data = await response.json();
@@ -307,7 +482,7 @@ function renderNetfilterData(data) {
 
 // Smart refresh for Queue
 async function smartRefreshQueue() {
-    const response = await fetch('/api/queue');
+    const response = await authenticatedFetch('/api/queue');
     if (!response.ok) return;
     
     const data = await response.json();
@@ -322,7 +497,7 @@ async function smartRefreshQueue() {
 
 // Smart refresh for Quarantine
 async function smartRefreshQuarantine() {
-    const response = await fetch('/api/quarantine');
+    const response = await authenticatedFetch('/api/quarantine');
     if (!response.ok) return;
     
     const data = await response.json();
@@ -365,7 +540,7 @@ function renderQuarantineData(data) {
 // Smart refresh for Dashboard
 async function smartRefreshDashboard() {
     try {
-        const response = await fetch('/api/stats/dashboard');
+        const response = await authenticatedFetch('/api/stats/dashboard');
         if (!response.ok) return;
         
         const data = await response.json();
@@ -397,7 +572,7 @@ async function smartRefreshDashboard() {
 // Smart refresh for Settings
 async function smartRefreshSettings() {
     try {
-        const response = await fetch('/api/settings/info');
+        const response = await authenticatedFetch('/api/settings/info');
         if (!response.ok) return;
         
         const data = await response.json();
@@ -489,7 +664,7 @@ async function loadDashboard() {
     try {
         console.log('Loading Dashboard...');
         
-        const response = await fetch('/api/stats/dashboard');
+        const response = await authenticatedFetch('/api/stats/dashboard');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -518,7 +693,7 @@ async function loadDashboardStatusSummary() {
     try {
         console.log('Loading Dashboard Status Summary...');
         
-        const response = await fetch('/api/status/summary');
+        const response = await authenticatedFetch('/api/status/summary');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -592,7 +767,7 @@ async function loadRecentActivity() {
     try {
         console.log('Loading Recent Activity...');
         
-        const response = await fetch('/api/stats/recent-activity?limit=10');
+        const response = await authenticatedFetch('/api/stats/recent-activity?limit=10');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -696,7 +871,7 @@ async function loadPostfixLogs(page = 1) {
         console.log('Loading Postfix logs:', `/api/logs/postfix?${params}`);
         const startTime = performance.now();
         
-        const response = await fetch(`/api/logs/postfix?${params}`);
+        const response = await authenticatedFetch(`/api/logs/postfix?${params}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -798,7 +973,7 @@ async function loadRspamdLogs(page = 1) {
         
         console.log('Loading Rspamd logs:', `/api/logs/rspamd?${params}`);
         
-        const response = await fetch(`/api/logs/rspamd?${params}`);
+        const response = await authenticatedFetch(`/api/logs/rspamd?${params}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -893,7 +1068,7 @@ async function loadNetfilterLogs(page = 1) {
         
         console.log('Loading Netfilter logs:', `/api/logs/netfilter?${params}`);
         
-        const response = await fetch(`/api/logs/netfilter?${params}`);
+        const response = await authenticatedFetch(`/api/logs/netfilter?${params}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -959,7 +1134,7 @@ async function loadQueue() {
         
         console.log('Loading Queue...');
         
-        const response = await fetch('/api/queue');
+        const response = await authenticatedFetch('/api/queue');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1051,7 +1226,7 @@ async function loadQuarantine() {
         
         console.log('Loading Quarantine...');
         
-        const response = await fetch('/api/quarantine');
+        const response = await authenticatedFetch('/api/quarantine');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1139,7 +1314,7 @@ async function loadMessages(page = 1) {
         
         console.log('Loading Messages:', `/api/messages?${params}`);
         
-        const response = await fetch(`/api/messages?${params}`);
+        const response = await authenticatedFetch(`/api/messages?${params}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1222,7 +1397,7 @@ async function loadStatus() {
 
 async function loadStatusContainers() {
     try {
-        const response = await fetch('/api/status/containers');
+        const response = await authenticatedFetch('/api/status/containers');
         let data = await response.json();
         
         const container = document.getElementById('status-containers');
@@ -1300,7 +1475,7 @@ async function loadStatusSystem() {
     try {
         console.log('Loading System Info...');
         
-        const response = await fetch('/api/status/mailcow-info');
+        const response = await authenticatedFetch('/api/status/mailcow-info');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1341,7 +1516,7 @@ async function loadStatusStorage() {
     try {
         console.log('Loading Storage Info...');
         
-        const response = await fetch('/api/status/storage');
+        const response = await authenticatedFetch('/api/status/storage');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1402,7 +1577,7 @@ async function loadStatusStorage() {
 
 async function loadStatusExtended() {
     try {
-        const response = await fetch('/api/settings/info');
+        const response = await authenticatedFetch('/api/settings/info');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -1532,7 +1707,7 @@ async function viewPostfixDetails(queueId) {
     content.innerHTML = '<div class="text-center py-8"><div class="loading mx-auto mb-4"></div><p class="text-gray-500 dark:text-gray-400">Loading...</p></div>';
     
     try {
-        const response = await fetch(`/api/logs/postfix/by-queue/${queueId}`);
+        const response = await authenticatedFetch(`/api/logs/postfix/by-queue/${queueId}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -1647,7 +1822,7 @@ async function viewMessageDetails(correlationKey) {
     content.innerHTML = '<div class="text-center py-8"><div class="loading mx-auto mb-4"></div><p class="text-gray-500 dark:text-gray-400">Loading...</p></div>';
     
     try {
-        const response = await fetch(`/api/message/${correlationKey}/details`);
+        const response = await authenticatedFetch(`/api/message/${correlationKey}/details`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -2187,7 +2362,7 @@ async function exportCSV(type) {
         const filters = currentFilters[type] || {};
         const params = new URLSearchParams(filters);
         
-        const response = await fetch(`/api/export/${type}/csv?${params}`);
+        const response = await authenticatedFetch(`/api/export/${type}/csv?${params}`);
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -2372,7 +2547,7 @@ async function loadSettings() {
     content.classList.add('hidden');
     
     try {
-        const response = await fetch('/api/settings/info');
+        const response = await authenticatedFetch('/api/settings/info');
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -2467,6 +2642,26 @@ function renderSettings(content, data) {
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Scheduler Workers</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.scheduler_workers || 4}</p>
+                    </div>
+                    <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Authentication</p>
+                        <p class="text-sm text-gray-900 dark:text-white mt-1">
+                            ${config.auth_enabled ? 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                                    <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                    </svg>
+                                    Enabled
+                                </span>` : 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
+                                    Disabled
+                                </span>`
+                            }
+                        </p>
+                        ${config.auth_enabled && config.auth_username ? 
+                            `<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Username: ${escapeHtml(config.auth_username)}</p>` : 
+                            ''
+                        }
                     </div>
                 </div>
             </div>

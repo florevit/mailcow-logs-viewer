@@ -51,6 +51,22 @@ nano .env
 
 **Review all other settings** and adjust as needed for your environment (timezone, fetch intervals, retention period, etc.)
 
+**🔐 Optional: Enable Authentication**
+
+For production deployments, enable HTTP Basic Authentication:
+
+```env
+AUTH_ENABLED=true
+AUTH_USERNAME=your_username
+AUTH_PASSWORD=your_secure_password
+```
+
+When enabled:
+- All pages and API endpoints require authentication
+- Users are redirected to a login page if not authenticated
+- Use strong passwords in production
+- **Important**: Use HTTPS/TLS when exposing over the internet
+
 ### Step 4: Get Your Mailcow API Key
 
 1. Log in to your Mailcow admin panel
@@ -90,6 +106,8 @@ Open your browser:
 ```
 http://localhost:8080
 ```
+
+**If authentication is enabled**, you'll be redirected to the login page. Enter your credentials to access the dashboard.
 
 Wait 1-2 minutes for the first logs to appear.
 

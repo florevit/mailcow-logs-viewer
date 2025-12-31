@@ -16,6 +16,7 @@ from .mailcow_api import mailcow_api
 from .routers import logs, stats
 from .routers import export as export_router
 from .migrations import run_migrations
+from .auth import BasicAuthMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,13 @@ async def lifespan(app: FastAPI):
     
     if settings.blacklist_emails_list:
         logger.info(f"Blacklist enabled with {len(settings.blacklist_emails_list)} email(s)")
+    
+    if settings.auth_enabled:
+        logger.info("Basic authentication is ENABLED")
+        if not settings.auth_password:
+            logger.warning("WARNING: Authentication enabled but password not set!")
+    else:
+        logger.info("Basic authentication is DISABLED")
     
     # Initialize database
     try:
@@ -88,6 +96,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add Basic Auth Middleware FIRST (before CORS)
+# This ensures ALL requests are authenticated when enabled
+app.add_middleware(BasicAuthMiddleware)
+
 # CORS middleware (allow all origins for now)
 app.add_middleware(
     CORSMiddleware,
@@ -109,9 +121,24 @@ app.include_router(settings_router.router, prefix="/api", tags=["Settings"])
 app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")
 
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    """Serve the login page"""
+    try:
+        with open("/app/frontend/login.html", "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Mailcow Logs Viewer</h1><p>Login page not found. Please check installation.</p>",
+            status_code=500
+        )
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Serve the main HTML page"""
+    """Serve the main HTML page - requires authentication"""
+    # Authentication is handled by middleware
+    # If user reaches here, they are authenticated
     try:
         with open("/app/frontend/index.html", "r") as f:
             return HTMLResponse(content=f.read())
@@ -135,7 +162,8 @@ async def health_check():
             "fetch_interval": settings.fetch_interval,
             "retention_days": settings.retention_days,
             "mailcow_url": settings.mailcow_url,
-            "blacklist_enabled": len(settings.blacklist_emails_list) > 0
+            "blacklist_enabled": len(settings.blacklist_emails_list) > 0,
+            "auth_enabled": settings.auth_enabled
         }
     }
 
@@ -153,7 +181,8 @@ async def app_info():
         "timezone": settings.tz,
         "app_title": settings.app_title,
         "app_logo_url": settings.app_logo_url,
-        "blacklist_count": len(settings.blacklist_emails_list)
+        "blacklist_count": len(settings.blacklist_emails_list),
+        "auth_enabled": settings.auth_enabled
     }
 
 

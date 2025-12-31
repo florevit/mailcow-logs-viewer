@@ -80,6 +80,20 @@ class Settings(BaseSettings):
     csv_export_limit: int = Field(default=10000, description="CSV export row limit")
     scheduler_workers: int = Field(default=4, description="Background job workers")
     
+    # Authentication Configuration
+    auth_enabled: bool = Field(
+        default=False,
+        description="Enable basic authentication"
+    )
+    auth_username: str = Field(
+        default="admin",
+        description="Basic auth username"
+    )
+    auth_password: str = Field(
+        default="",
+        description="Basic auth password (required if auth_enabled=True)"
+    )
+    
     @validator('mailcow_url')
     def validate_mailcow_url(cls, v):
         """Ensure URL doesn't end with slash"""

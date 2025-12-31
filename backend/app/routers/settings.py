@@ -92,7 +92,9 @@ async def get_settings_info(db: Session = Depends(get_db)):
                 "blacklist_count": len(settings.blacklist_emails_list),
                 "max_search_results": settings.max_search_results,
                 "csv_export_limit": settings.csv_export_limit,
-                "scheduler_workers": settings.scheduler_workers
+                "scheduler_workers": settings.scheduler_workers,
+                "auth_enabled": settings.auth_enabled,
+                "auth_username": settings.auth_username if settings.auth_enabled else None
             },
             "import_status": {
                 "postfix": {
