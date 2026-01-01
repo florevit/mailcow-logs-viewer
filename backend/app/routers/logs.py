@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, desc, func
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ..database import get_db
@@ -16,6 +16,25 @@ from ..config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def format_datetime_utc(dt: Optional[datetime]) -> Optional[str]:
+    """
+    Format datetime for API response with proper UTC timezone
+    Always returns ISO format with 'Z' suffix so browser knows it's UTC
+    """
+    if dt is None:
+        return None
+    
+    # If naive (no timezone), assume UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    # Convert to UTC if not already
+    dt_utc = dt.astimezone(timezone.utc)
+    
+    # Format as ISO string with 'Z' suffix for UTC
+    return dt_utc.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
 @router.get("/logs/postfix/by-queue/{queue_id}")
@@ -380,7 +399,7 @@ async def get_netfilter_logs(
             "data": [
                 {
                     "id": log.id,
-                    "time": log.time.isoformat(),
+                    "time": format_datetime_utc(log.time),
                     "priority": log.priority,
                     "message": log.message,
                     "ip": log.ip,

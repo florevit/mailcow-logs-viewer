@@ -253,27 +253,27 @@ class MailcowAPI:
         except MailcowAPIError as e:
             logger.error(f"Failed to fetch vmail status: {e}")
             return {}
+    
+    async def get_status_version(self) -> str:
+        """
+        Fetch Mailcow version
         
-        async def get_status_version(self) -> str:
-            """
-            Fetch Mailcow version
+        Returns:
+            Version string
+        """
+        logger.info("Fetching Mailcow version")
+        try:
+            data = await self._make_request("/api/v1/get/status/version")
             
-            Returns:
-                Version string
-            """
-            logger.info("Fetching Mailcow version")
-            try:
-                data = await self._make_request("/api/v1/get/status/version")
-                
-                if isinstance(data, list) and len(data) > 0:
-                    return data[0].get('version', 'unknown')
-                
-                logger.warning(f"Unexpected version response format: {type(data)}")
-                return 'unknown'
-                
-            except MailcowAPIError as e:
-                logger.error(f"Failed to fetch version: {e}")
-                return 'unknown'
+            if isinstance(data, list) and len(data) > 0:
+                return data[0].get('version', 'unknown')
+            
+            logger.warning(f"Unexpected version response format: {type(data)}")
+            return 'unknown'
+            
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch version: {e}")
+            return 'unknown'
     
     async def get_domains(self) -> List[Dict[str, Any]]:
         """
@@ -295,6 +295,31 @@ class MailcowAPI:
             
         except MailcowAPIError as e:
             logger.error(f"Failed to fetch domains: {e}")
+            return []
+    
+    async def get_active_domains(self) -> List[str]:
+        """
+        Fetch active domains from Mailcow and return domain names only
+        
+        Returns:
+            List of active domain names (where active=1)
+        """
+        logger.info("Fetching active domains")
+        try:
+            domains = await self.get_domains()
+            
+            # Filter active domains and extract domain_name
+            active_domains = [
+                domain.get('domain_name', '')
+                for domain in domains
+                if domain.get('active') == 1 and domain.get('domain_name')
+            ]
+            
+            logger.info(f"Found {len(active_domains)} active domains: {', '.join(active_domains)}")
+            return active_domains
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch active domains: {e}")
             return []
     
     async def get_mailboxes(self) -> List[Dict[str, Any]]:
@@ -359,5 +384,4 @@ class MailcowAPI:
             return False
 
 
-# Global API client instance
 mailcow_api = MailcowAPI()

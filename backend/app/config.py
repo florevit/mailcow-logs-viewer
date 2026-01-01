@@ -1,25 +1,21 @@
 """
 Configuration management using Pydantic Settings
-ALL settings loaded from environment variables - NO hardcoded values!
 """
 from pydantic_settings import BaseSettings
 from pydantic import Field, validator
-from typing import List
+from typing import List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
+_cached_active_domains: Optional[List[str]] = None
+
 
 class Settings(BaseSettings):
-    """Application settings - ALL from environment variables"""
+    """Application settings"""
     
-    # Mailcow Configuration
     mailcow_url: str = Field(..., description="Mailcow instance URL")
     mailcow_api_key: str = Field(..., description="Mailcow API key")
-    mailcow_local_domains: str = Field(
-        default="sendmail.co.il",
-        description="Comma-separated list of local domains"
-    )
     mailcow_api_timeout: int = Field(default=30, description="API request timeout in seconds")
     
     # Blacklist Configuration
@@ -32,11 +28,11 @@ class Settings(BaseSettings):
     fetch_interval: int = Field(default=60, description="Seconds between log fetches")
     fetch_count_postfix: int = Field(
         default=2000, 
-        description="Postfix logs to fetch per request (higher because each email = ~7-10 log lines)"
+        description="Postfix logs to fetch per request"
     )
     fetch_count_rspamd: int = Field(
         default=500, 
-        description="Rspamd logs to fetch per request (1 log = 1 email)"
+        description="Rspamd logs to fetch per request"
     )
     fetch_count_netfilter: int = Field(
         default=500, 
@@ -44,7 +40,7 @@ class Settings(BaseSettings):
     )
     retention_days: int = Field(default=7, description="Days to keep logs")
     
-    # Correlation Configuration (NEW!)
+    # Correlation Configuration
     max_correlation_age_minutes: int = Field(
         default=10,
         description="Stop searching for correlations older than this (minutes)"
@@ -69,7 +65,7 @@ class Settings(BaseSettings):
     )
     tz: str = Field(
         default="UTC",
-        description="Timezone (e.g. Asia/Jerusalem, America/New_York)"
+        description="Timezone"
     )
     app_title: str = Field(default="Mailcow Logs Viewer", description="Application title")
     app_logo_url: str = Field(default="", description="Application logo URL (optional)")
@@ -111,8 +107,12 @@ class Settings(BaseSettings):
     
     @property
     def local_domains_list(self) -> List[str]:
-        """Parse local domains into a list"""
-        return [d.strip() for d in self.mailcow_local_domains.split(',') if d.strip()]
+        """Get active domains from Mailcow API cache"""
+        global _cached_active_domains
+        if _cached_active_domains is None:
+            logger.warning("Local domains cache not yet populated")
+            return []
+        return _cached_active_domains
     
     @property
     def blacklist_emails_list(self) -> List[str]:
@@ -142,14 +142,11 @@ class Settings(BaseSettings):
         case_sensitive = False
 
 
-# Global settings instance
 settings = Settings()
 
 
 def setup_logging():
-    """Configure application logging based on LOG_LEVEL from .env"""
-    
-    # Simple format
+    """Configure application logging"""
     log_format = '%(levelname)s - %(message)s'
     
     logging.basicConfig(
@@ -157,7 +154,6 @@ def setup_logging():
         format=log_format
     )
     
-    # Silence noisy third-party libraries
     logging.getLogger('httpx').setLevel(logging.ERROR)
     logging.getLogger('httpcore').setLevel(logging.ERROR)
     logging.getLogger('urllib3').setLevel(logging.ERROR)
@@ -165,8 +161,20 @@ def setup_logging():
     logging.getLogger('apscheduler').setLevel(logging.WARNING)
     
     if settings.debug:
-        logger.warning("[WARNING] Debug mode is enabled")
+        logger.warning("Debug mode is enabled")
 
 
 # Initialize logging
 setup_logging()
+
+
+def set_cached_active_domains(domains: List[str]) -> None:
+    """Set the cached active domains list"""
+    global _cached_active_domains
+    _cached_active_domains = domains
+    logger.info(f"Cached {len(domains)} active domains from Mailcow API")
+
+
+def get_cached_active_domains() -> Optional[List[str]]:
+    """Get the cached active domains list"""
+    return _cached_active_domains

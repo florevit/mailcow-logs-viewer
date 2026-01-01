@@ -77,10 +77,6 @@ def parse_postfix_message(message: str) -> Dict[str, Any]:
     """
     Parse Postfix log message to extract structured data
     
-    Handles two types of message-id lines:
-    1. Standalone: "CFCF76E2F45: message-id=<83b54793-ae84-7f0f-5eb5-1a203fd1227e@sendmail.co.il>"
-    2. Inline in delivery: "CFCF76E2F45: to=<recipient@domain.com>, relay=..., status=sent (250 2.6.0 <message-id@domain.com> ...)"
-    
     Args:
         message: Postfix log message string
     

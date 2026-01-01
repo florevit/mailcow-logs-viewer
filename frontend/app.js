@@ -263,6 +263,12 @@ async function loadAppInfo() {
         if (data.app_title) {
             document.getElementById('app-title').textContent = data.app_title;
             document.title = data.app_title;
+            
+            // Update footer app name
+            const footerName = document.getElementById('app-name-footer');
+            if (footerName) {
+                footerName.textContent = data.app_title;
+            }
         }
         
         if (data.app_logo_url) {
@@ -270,6 +276,12 @@ async function loadAppInfo() {
             logoImg.src = data.app_logo_url;
             logoImg.classList.remove('hidden');
             document.getElementById('default-logo').classList.add('hidden');
+        }
+        
+        // Update footer version
+        const footerVersion = document.getElementById('app-version-footer');
+        if (footerVersion && data.version) {
+            footerVersion.textContent = `v${data.version}`;
         }
         
         // Show/hide logout button based on auth status
@@ -281,8 +293,30 @@ async function loadAppInfo() {
                 logoutBtn.classList.add('hidden');
             }
         }
+        
+        // Load app version status for update check
+        await loadAppVersionStatus();
     } catch (error) {
         console.error('Failed to load app info:', error);
+    }
+}
+
+async function loadAppVersionStatus() {
+    try {
+        const response = await authenticatedFetch('/api/status/app-version');
+        if (!response.ok) return;
+        
+        const data = await response.json();
+        const updateBadge = document.getElementById('update-badge');
+        
+        if (updateBadge && data.update_available) {
+            updateBadge.classList.remove('hidden');
+            updateBadge.title = `Update available: v${data.latest_version}`;
+        } else if (updateBadge) {
+            updateBadge.classList.add('hidden');
+        }
+    } catch (error) {
+        console.error('Failed to load app version status:', error);
     }
 }
 
@@ -298,6 +332,12 @@ let lastDataCache = {
     quarantine: null,
     dashboard: null,
     settings: null
+};
+
+// Cache for version info (separate from settings cache, doesn't update on smart refresh)
+let versionInfoCache = {
+    app_version: null,
+    version_info: null
 };
 
 function startAutoRefresh() {
@@ -443,11 +483,71 @@ function renderMessagesData(data) {
     `;
 }
 
+// Deduplicate netfilter logs based on message + time + priority
+function deduplicateNetfilterLogs(logs) {
+    if (!logs || logs.length === 0) return [];
+    
+    const seen = new Set();
+    const uniqueLogs = [];
+    
+    for (const log of logs) {
+        // Create unique key from message + time + priority
+        const key = `${log.message || ''}|${log.time || ''}|${log.priority || ''}`;
+        
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniqueLogs.push(log);
+        }
+    }
+    
+    return uniqueLogs;
+}
+
+// Render netfilter without loading spinner (for smart refresh)
+function renderNetfilterData(data) {
+    const container = document.getElementById('netfilter-logs');
+    if (!container) return;
+    
+    if (!data.data || data.data.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-8">No logs found</p>';
+        return;
+    }
+    
+    // Deduplicate logs
+    const uniqueLogs = deduplicateNetfilterLogs(data.data);
+    
+    // Update count display with deduplicated count
+    const countEl = document.getElementById('security-count');
+    if (countEl) {
+        countEl.textContent = uniqueLogs.length > 0 ? `(${uniqueLogs.length.toLocaleString()} results)` : '';
+    }
+    
+    container.innerHTML = `
+        <div class="space-y-3">
+            ${uniqueLogs.map(log => `
+                <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <span class="font-mono text-sm font-semibold text-gray-900 dark:text-white">${log.ip || '-'}</span>
+                            ${log.username && log.username !== '-' ? `<span class="text-sm text-blue-600 dark:text-blue-400">${escapeHtml(log.username)}</span>` : ''}
+                            <span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${log.action === 'banned' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'}">${log.action || 'warning'}</span>
+                            ${log.attempts_left !== null && log.attempts_left !== undefined ? `<span class="text-xs text-gray-500 dark:text-gray-400">${log.attempts_left} attempts left</span>` : ''}
+                        </div>
+                        <span class="text-xs text-gray-500 dark:text-gray-400">${formatTime(log.time)}</span>
+                    </div>
+                    <p class="text-sm text-gray-700 dark:text-gray-300 break-words">${escapeHtml(log.message || '-')}</p>
+                </div>
+            `).join('')}
+        </div>
+        ${renderPagination('netfilter', data.page, data.pages)}
+    `;
+}
+
 // Smart refresh for Netfilter
 async function smartRefreshNetfilter() {
     const filters = currentFilters.netfilter || {};
     const params = new URLSearchParams({
-        page: currentPage.netfilter,
+        page: currentPage.netfilter || 1,
         limit: 50,
         ...filters
     });
@@ -460,52 +560,11 @@ async function smartRefreshNetfilter() {
     if (hasDataChanged(data, 'netfilter')) {
         console.log('[REFRESH] Netfilter data changed, updating UI');
         lastDataCache.netfilter = data;
+        // Use renderNetfilterData to update content without loading spinner (like Messages page)
         renderNetfilterData(data);
     }
 }
 
-// Render netfilter without loading spinner
-function renderNetfilterData(data) {
-    const container = document.getElementById('netfilter-logs');
-    if (!container) return;
-    
-    if (!data.data || data.data.length === 0) {
-        container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-8">No logs found</p>';
-        return;
-    }
-    
-    container.innerHTML = `
-        <div class="mobile-scroll overflow-x-auto">
-            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                <thead class="bg-gray-50 dark:bg-gray-700">
-                    <tr>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Time</th>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">IP</th>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Username</th>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Auth Method</th>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Action</th>
-                        <th class="px-3 sm:px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider hide-mobile">Attempts Left</th>
-                    </tr>
-                </thead>
-                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                    ${data.data.map(log => `
-                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm text-gray-900 dark:text-gray-100 whitespace-nowrap">${formatTime(log.time)}</td>
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm font-mono text-gray-900 dark:text-gray-100">${log.ip || '-'}</td>
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm text-gray-900 dark:text-gray-100">${escapeHtml(log.username || '-')}</td>
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm text-gray-600 dark:text-gray-300">${log.auth_method || '-'}</td>
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm">
-                                <span class="inline-block px-2 py-1 text-xs font-medium rounded ${log.action === 'banned' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'}">${log.action || 'warning'}</span>
-                            </td>
-                            <td class="px-3 sm:px-4 py-3 text-xs sm:text-sm text-gray-600 dark:text-gray-300 hide-mobile">${log.attempts_left !== null ? log.attempts_left : '-'}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        </div>
-        ${renderPagination('netfilter', data.page, data.pages)}
-    `;
-}
 
 // Smart refresh for Queue
 async function smartRefreshQueue() {
@@ -610,6 +669,14 @@ async function smartRefreshSettings() {
             
             const content = document.getElementById('settings-content');
             if (content && !content.classList.contains('hidden')) {
+                // Preserve version info from cache (don't reload it on smart refresh)
+                if (versionInfoCache.app_version) {
+                    data.app_version = versionInfoCache.app_version;
+                }
+                if (versionInfoCache.version_info) {
+                    data.version_info = versionInfoCache.version_info;
+                }
+                
                 renderSettings(content, data);
             }
         }
@@ -1103,20 +1170,25 @@ async function loadNetfilterLogs(page = 1) {
         const data = await response.json();
         console.log('Netfilter data:', data);
         
-        // Update count display
-        const countEl = document.getElementById('security-count');
-        if (countEl) {
-            countEl.textContent = data.total ? `(${data.total.toLocaleString()} results)` : '';
-        }
-        
         if (!data.data || data.data.length === 0) {
             container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-8">No logs found</p>';
+            const countEl = document.getElementById('security-count');
+            if (countEl) countEl.textContent = '';
             return;
+        }
+        
+        // Deduplicate logs based on message + time + priority
+        const uniqueLogs = deduplicateNetfilterLogs(data.data);
+        
+        // Update count display with deduplicated count
+        const countEl = document.getElementById('security-count');
+        if (countEl) {
+            countEl.textContent = uniqueLogs.length > 0 ? `(${uniqueLogs.length.toLocaleString()} results)` : '';
         }
         
         container.innerHTML = `
             <div class="space-y-3">
-                ${data.data.map(log => `
+                ${uniqueLogs.map(log => `
                     <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
                         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
                             <div class="flex flex-wrap items-center gap-2">
@@ -2574,13 +2646,32 @@ async function loadSettings() {
     content.classList.add('hidden');
     
     try {
-        const response = await authenticatedFetch('/api/settings/info');
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+        // Load settings info and app version status in parallel
+        const [settingsResponse, appInfoResponse, versionResponse] = await Promise.all([
+            authenticatedFetch('/api/settings/info'),
+            authenticatedFetch('/api/info'),
+            authenticatedFetch('/api/status/app-version')
+        ]);
+        
+        if (!settingsResponse.ok) {
+            throw new Error(`HTTP ${settingsResponse.status}`);
         }
         
-        const data = await response.json();
+        const data = await settingsResponse.json();
+        const appInfo = appInfoResponse.ok ? await appInfoResponse.json() : null;
+        const versionInfo = versionResponse.ok ? await versionResponse.json() : null;
+        
         console.log('Settings loaded:', data);
+        
+        // Add version info to data and cache it
+        if (appInfo) {
+            data.app_version = appInfo.version;
+            versionInfoCache.app_version = appInfo.version;
+        }
+        if (versionInfo) {
+            data.version_info = versionInfo;
+            versionInfoCache.version_info = versionInfo;
+        }
         
         renderSettings(content, data);
         
@@ -2603,8 +2694,55 @@ async function loadSettings() {
 
 function renderSettings(content, data) {
     const config = data.configuration || {};
+    const appVersion = data.app_version || 'Unknown';
+    const versionInfo = data.version_info || {};
     
     content.innerHTML = `
+        <!-- Version Information Section -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 mb-6">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                    </svg>
+                    Version Information
+                </h3>
+            </div>
+            <div class="p-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Current Version</p>
+                        <p class="text-lg font-semibold text-gray-900 dark:text-white">v${appVersion}</p>
+                    </div>
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Latest Version</p>
+                        <div class="flex items-center gap-2">
+                            <p class="text-lg font-semibold text-gray-900 dark:text-white">${versionInfo.latest_version ? `v${versionInfo.latest_version}` : 'Checking...'}</p>
+                            ${versionInfo.update_available ? `
+                                <span class="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 rounded text-xs font-medium">
+                                    Update Available
+                                </span>
+                            ` : versionInfo.latest_version && !versionInfo.update_available ? `
+                                <span class="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded text-xs font-medium">
+                                    Up to Date
+                                </span>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+                ${versionInfo.update_available ? `
+                    <div class="mt-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
+                        <p class="text-sm text-green-800 dark:text-green-300">
+                            <strong>Update available!</strong> A new version (v${versionInfo.latest_version}) is available on GitHub.
+                        </p>
+                        <a href="https://github.com/ShlomiPorush/mailcow-logs-viewer/releases/latest" target="_blank" rel="noopener noreferrer" class="text-sm text-green-600 dark:text-green-400 hover:underline mt-2 inline-block">
+                            View release notes →
+                        </a>
+                    </div>
+                ` : ''}
+            </div>
+        </div>
+
         <!-- Configuration Section -->
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
             <div class="p-4 border-b border-gray-200 dark:border-gray-700">
@@ -2622,9 +2760,26 @@ function renderSettings(content, data) {
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Mailcow URL</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1 font-mono break-all">${escapeHtml(config.mailcow_url || 'N/A')}</p>
                     </div>
-                    <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Local Domains</p>
-                        <p class="text-sm text-gray-900 dark:text-white mt-1">${config.local_domains ? config.local_domains.join(', ') : 'N/A'}</p>
+                    <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg ${config.local_domains && config.local_domains.length > 0 ? 'col-span-1 md:col-span-2 lg:col-span-3' : ''}">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">
+                            Local Domains
+                            ${config.local_domains && config.local_domains.length > 0 ? 
+                                `<span class="ml-1 text-gray-400 dark:text-gray-500 font-normal">(${config.local_domains.length})</span>` : 
+                                ''
+                            }
+                        </p>
+                        ${config.local_domains && config.local_domains.length > 0 ? 
+                            `<div class="mt-2 max-h-64 overflow-y-auto">
+                                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                    ${config.local_domains.map(domain => `
+                                        <div class="text-sm text-gray-900 dark:text-white font-mono px-3 py-1.5 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-600 truncate" title="${escapeHtml(domain)}">
+                                            ${escapeHtml(domain)}
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>` : 
+                            '<p class="text-sm text-gray-500 dark:text-gray-400 mt-1">N/A</p>'
+                        }
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Fetch Interval</p>
@@ -2714,6 +2869,10 @@ function renderImportCard(title, data, color) {
         <div class="p-4 border ${colorClasses[color]} rounded-lg">
             <p class="font-semibold text-gray-900 dark:text-white mb-3">${title}</p>
             <div class="space-y-2 text-sm">
+                <div>
+                    <p class="text-xs text-gray-500 dark:text-gray-400">Last Fetch Run</p>
+                    <p class="text-gray-900 dark:text-white font-medium">${data.last_fetch_run ? formatTime(data.last_fetch_run) : 'Never'}</p>
+                </div>
                 <div>
                     <p class="text-xs text-gray-500 dark:text-gray-400">Last Import</p>
                     <p class="text-gray-900 dark:text-white">${data.last_import ? formatTime(data.last_import) : 'Never'}</p>

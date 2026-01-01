@@ -4,21 +4,66 @@ This document describes all available API endpoints for the Mailcow Logs Viewer 
 
 **Base URL:** `http://your-server:8080/api`
 
+**Authentication:** When `AUTH_ENABLED=true`, all API endpoints (except `/api/health`) require HTTP Basic Authentication. Include the `Authorization: Basic <base64(username:password)>` header in all requests.
+
 ---
 
 ## Table of Contents
 
-1. [Health & Info](#health--info)
-2. [Messages (Unified View)](#messages-unified-view)
-3. [Logs](#logs)
+1. [Authentication](#authentication)
+2. [Health & Info](#health--info)
+3. [Messages (Unified View)](#messages-unified-view)
+4. [Logs](#logs)
    - [Postfix Logs](#postfix-logs)
    - [Rspamd Logs](#rspamd-logs)
    - [Netfilter Logs](#netfilter-logs)
-4. [Queue & Quarantine](#queue--quarantine)
-5. [Statistics](#statistics)
-6. [Status](#status)
-7. [Settings](#settings)
-8. [Export](#export)
+5. [Queue & Quarantine](#queue--quarantine)
+6. [Statistics](#statistics)
+7. [Status](#status)
+8. [Settings](#settings)
+9. [Export](#export)
+
+---
+
+## Authentication
+
+### Overview
+
+When authentication is enabled (`AUTH_ENABLED=true`), all API endpoints except `/api/health` require HTTP Basic Authentication.
+
+**Public Endpoints (No Authentication Required):**
+- `GET /api/health` - Health check (for Docker monitoring)
+- `GET /login` - Login page (HTML)
+
+**Protected Endpoints (Authentication Required):**
+- All other `/api/*` endpoints
+
+### Authentication Method
+
+Use HTTP Basic Authentication with the credentials configured in your environment:
+- Username: `AUTH_USERNAME` (default: `admin`)
+- Password: `AUTH_PASSWORD`
+
+**Example Request:**
+```bash
+curl -u username:password http://your-server:8080/api/info
+```
+
+Or with explicit header:
+```bash
+curl -H "Authorization: Basic $(echo -n 'username:password' | base64)" \
+  http://your-server:8080/api/info
+```
+
+### Login Endpoint
+
+#### GET /login
+
+Serves the login page (HTML). This endpoint is always publicly accessible.
+
+**Response:** HTML page with login form
+
+**Note:** When authentication is disabled, accessing this endpoint will automatically redirect to the main application.
 
 ---
 
@@ -28,17 +73,20 @@ This document describes all available API endpoints for the Mailcow Logs Viewer 
 
 Health check endpoint for monitoring and load balancers.
 
+**Authentication:** Not required (public endpoint for Docker health checks)
+
 **Response:**
 ```json
 {
   "status": "healthy",
   "database": "connected",
-  "version": "1.3.0",
+  "version": "1.4.3",
   "config": {
     "fetch_interval": 60,
     "retention_days": 7,
     "mailcow_url": "https://mail.example.com",
-    "blacklist_enabled": true
+    "blacklist_enabled": true,
+    "auth_enabled": false
   }
 }
 ```
@@ -53,7 +101,7 @@ Application information and configuration.
 ```json
 {
   "name": "Mailcow Logs Viewer",
-  "version": "1.3.0",
+  "version": "1.4.3",
   "mailcow_url": "https://mail.example.com",
   "local_domains": ["example.com", "mail.example.com"],
   "fetch_interval": 60,
@@ -61,7 +109,8 @@ Application information and configuration.
   "timezone": "UTC",
   "app_title": "Mailcow Logs Viewer",
   "app_logo_url": "",
-  "blacklist_count": 3
+  "blacklist_count": 3,
+  "auth_enabled": false
 }
 ```
 
@@ -661,6 +710,25 @@ Get Mailcow version and update status.
 
 ---
 
+### GET /status/app-version
+
+Get application version and check for updates from GitHub.
+
+**Response:**
+```json
+{
+  "current_version": "1.4.3",
+  "latest_version": "1.4.3",
+  "update_available": false,
+  "changelog": "Release notes...",
+  "last_checked": "2026-01-01T10:30:00Z"
+}
+```
+
+**Note:** This endpoint checks GitHub once per day and caches the result.
+
+---
+
 ### GET /status/mailcow-info
 
 Get Mailcow system information.
@@ -725,7 +793,9 @@ Get system configuration and status information.
     "mailcow_url": "https://mail.example.com",
     "local_domains": ["example.com"],
     "fetch_interval": 60,
-    "fetch_count": 500,
+    "fetch_count_postfix": 2000,
+    "fetch_count_rspamd": 500,
+    "fetch_count_netfilter": 500,
     "retention_days": 7,
     "timezone": "UTC",
     "app_title": "Mailcow Logs Viewer",
@@ -734,21 +804,26 @@ Get system configuration and status information.
     "blacklist_count": 3,
     "max_search_results": 1000,
     "csv_export_limit": 10000,
-    "scheduler_workers": 4
+    "scheduler_workers": 4,
+    "auth_enabled": false,
+    "auth_username": null
   },
   "import_status": {
     "postfix": {
       "last_import": "2025-12-25T10:30:00Z",
+      "last_fetch_run": "2025-12-25T10:35:00Z",
       "total_entries": 50000,
       "oldest_entry": "2025-12-18T00:00:00Z"
     },
     "rspamd": {
       "last_import": "2025-12-25T10:30:00Z",
+      "last_fetch_run": "2025-12-25T10:35:00Z",
       "total_entries": 45000,
       "oldest_entry": "2025-12-18T00:00:00Z"
     },
     "netfilter": {
       "last_import": "2025-12-25T10:30:00Z",
+      "last_fetch_run": "2025-12-25T10:35:00Z",
       "total_entries": 1000,
       "oldest_entry": "2025-12-18T00:00:00Z"
     }
@@ -928,6 +1003,15 @@ All endpoints may return the following error responses:
   "detail": "Resource not found"
 }
 ```
+
+### 401 Unauthorized
+```json
+{
+  "detail": "Authentication required"
+}
+```
+
+**Note:** Returned when authentication is enabled but no valid credentials are provided. The response does not include `WWW-Authenticate` header to prevent browser popup dialogs.
 
 ### 500 Internal Server Error
 ```json

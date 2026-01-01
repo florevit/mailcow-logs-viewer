@@ -111,8 +111,9 @@ All settings via environment variables. See **[env.example](env.example)** for f
 |----------|-------------|
 | `MAILCOW_URL` | Mailcow instance URL |
 | `MAILCOW_API_KEY` | Mailcow API key |
-| `MAILCOW_LOCAL_DOMAINS` | Your email domains |
 | `POSTGRES_PASSWORD` | Database password |
+
+**Note:** Active domains are automatically fetched from Mailcow API - no configuration needed!
 
 ### Key Optional Settings
 

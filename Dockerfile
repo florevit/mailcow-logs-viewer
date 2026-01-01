@@ -22,6 +22,9 @@ COPY backend/app/ /app/app/
 # Copy frontend files
 COPY frontend/ /app/frontend/
 
+# Copy VERSION file
+COPY VERSION /app/VERSION
+
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app

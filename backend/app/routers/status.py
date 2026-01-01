@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any
 
 from ..mailcow_api import mailcow_api
+from ..version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,15 @@ router = APIRouter()
 version_cache = {
     "checked_at": None,
     "current_version": None,
+    "latest_version": None,
+    "update_available": False,
+    "changelog": None
+}
+
+# Cache for app version check (check once per day)
+app_version_cache = {
+    "checked_at": None,
+    "current_version": __version__,  # Read from VERSION file
     "latest_version": None,
     "update_available": False,
     "changelog": None
@@ -160,6 +170,74 @@ async def get_version_status():
         }
     except Exception as e:
         logger.error(f"Error fetching version status: {e}")
+
+
+@router.get("/status/app-version")
+async def get_app_version_status():
+    """
+    Get current app version and check for updates from GitHub
+    Checks GitHub once per day and caches the result
+    """
+    try:
+        global app_version_cache
+        
+        # Check if we need to refresh the cache (once per day)
+        now = datetime.utcnow()
+        if (app_version_cache["checked_at"] is None or 
+            now - app_version_cache["checked_at"] > timedelta(days=1)):
+            
+            logger.info("Checking app version and updates from GitHub...")
+            
+            # Check GitHub for latest version
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.get(
+                        "https://api.github.com/repos/ShlomiPorush/mailcow-logs-viewer/releases/latest"
+                    )
+                    
+                    if response.status_code == 200:
+                        release_data = response.json()
+                        latest_version = release_data.get('tag_name', 'unknown')
+                        # Remove 'v' prefix if present
+                        if latest_version.startswith('v'):
+                            latest_version = latest_version[1:]
+                        changelog = release_data.get('body', '')
+                        
+                        app_version_cache["latest_version"] = latest_version
+                        app_version_cache["changelog"] = changelog
+                        
+                        # Compare versions (simple string comparison)
+                        app_version_cache["update_available"] = app_version_cache["current_version"] != latest_version
+                        
+                        logger.info(f"App version check: Current={app_version_cache['current_version']}, Latest={latest_version}")
+                    else:
+                        logger.warning(f"GitHub API returned status {response.status_code}")
+                        app_version_cache["latest_version"] = "unknown"
+                        app_version_cache["update_available"] = False
+                        
+            except Exception as e:
+                logger.error(f"Failed to check GitHub for app updates: {e}")
+                app_version_cache["latest_version"] = "unknown"
+                app_version_cache["update_available"] = False
+            
+            app_version_cache["checked_at"] = now
+        
+        return {
+            "current_version": app_version_cache["current_version"],
+            "latest_version": app_version_cache["latest_version"],
+            "update_available": app_version_cache["update_available"],
+            "changelog": app_version_cache["changelog"],
+            "last_checked": app_version_cache["checked_at"].isoformat() if app_version_cache["checked_at"] else None
+        }
+    except Exception as e:
+        logger.error(f"Error fetching app version status: {e}")
+        return {
+            "current_version": app_version_cache["current_version"],
+            "latest_version": "unknown",
+            "update_available": False,
+            "changelog": None,
+            "last_checked": None
+        }
         raise HTTPException(status_code=500, detail=str(e))
 
 

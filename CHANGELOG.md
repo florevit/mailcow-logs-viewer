@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.3] - 2026-01-01
+
+### Changed
+
+#### Configuration
+- **Automatic Domain Detection**: Removed `MAILCOW_LOCAL_DOMAINS` environment variable requirement
+  - Active domains are now automatically fetched from Mailcow API (`/api/v1/get/domain/all`)
+  - Only active domains are used
+  - Domains are cached on application startup
+  - No manual domain configuration needed anymore
+
+#### UI Improvements
+- **Local Domains Display**: Enhanced domains display in Settings page
+  - Changed from comma-separated list to grid layout (columns)
+  - Scrollable container for many domains
+
+#### Code Quality
+- **Code Cleanup**: Removed unnecessary comments from codebase
+  - Removed verbose comments that don't add value
+  - Cleaned up phase markers and redundant inline comments
+  - Improved code readability
+
+### Fixed
+
+#### Security Tab
+- **Timestamp Formatting**: Fixed timestamp display in Security tab to match Messages page format
+  - All timestamps now properly formatted with UTC timezone ('Z' suffix)
+  - Consistent date/time display across all tabs
+- **Banned Filter**: Fixed filter not working correctly for "Banning" messages
+  - Now correctly identifies "Banning" (present tense) messages as banned actions
+  - Uses priority field ("crit") to determine ban status when message parsing is ambiguous
+  - Added support for CIDR notation in ban messages (e.g., "Banning 3.134.148.0/24")
+- **View Consistency**: Removed old table view that was sometimes displayed
+  - Only card-based view is now used consistently
+  - Smart refresh now uses same rendering function as initial load
+- **Duplicate Log Prevention**: Fixed duplicate security events appearing in Security tab
+  - Added deduplication logic based on message + time + priority combination
+  - Frontend filters duplicates before display (handles legacy data)
+  - Backend import now checks database for existing logs with same message + time + priority before inserting
+  - Prevents duplicate entries from being stored in database during import
+
+#### Import Status
+- **Last Fetch Run Time**: Added tracking of when imports run (not just when data is imported)
+  - Status page now shows "Last Fetch Run" (when import job ran) separate from "Last Import" (when data was actually imported)
+  - Resolves confusion when imports run but no new logs are available
+  - All three log types (Postfix, Rspamd, Netfilter) now track fetch run times
+
+#### Netfilter Logging
+- **Enhanced Logging**: Added detailed debug logs for Netfilter import process
+  - Logs show when fetch starts, how many logs received, how many imported, and how many skipped as duplicates
+  - Better error tracking for troubleshooting import delays
+- **Import Deduplication**: Improved duplicate detection during Netfilter log import
+  - Now checks database for existing logs with same message + time + priority before inserting
+  - Uses combination of message + time + priority as unique identifier (instead of time + IP + message)
+  - Prevents duplicate entries from being stored in database
+
+### Added
+
+#### Version Management
+- **VERSION File**: Version number now managed in single `VERSION` file instead of hardcoded in multiple places
+  - Supports both Docker and development environments
+
+#### Footer
+- **Application Footer**: Added footer to all pages with:
+  - Application name and current version
+  - "Update Available" badge when new version is detected
+
+#### Settings Page
+- **Version Information Section**: Added version display in Settings page
+  - Shows current installed version
+  - Shows latest available version from GitHub
+  - Displays "Update Available" or "Up to Date" status
+  - Link to release notes when update is available
+
+---
+
 ## [1.4.2] - 2025-12-31
 
 ### Fixed

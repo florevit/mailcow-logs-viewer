@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 from ..database import get_db
 from ..models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from ..config import settings
+from ..scheduler import last_fetch_run_time
 
 logger = logging.getLogger(__name__)
 
@@ -99,16 +100,19 @@ async def get_settings_info(db: Session = Depends(get_db)):
             "import_status": {
                 "postfix": {
                     "last_import": format_datetime_utc(last_postfix),
+                    "last_fetch_run": format_datetime_utc(last_fetch_run_time.get('postfix')),
                     "total_entries": total_postfix or 0,
                     "oldest_entry": format_datetime_utc(oldest_postfix)
                 },
                 "rspamd": {
                     "last_import": format_datetime_utc(last_rspamd),
+                    "last_fetch_run": format_datetime_utc(last_fetch_run_time.get('rspamd')),
                     "total_entries": total_rspamd or 0,
                     "oldest_entry": format_datetime_utc(oldest_rspamd)
                 },
                 "netfilter": {
                     "last_import": format_datetime_utc(last_netfilter),
+                    "last_fetch_run": format_datetime_utc(last_fetch_run_time.get('netfilter')),
                     "total_entries": total_netfilter or 0,
                     "oldest_entry": format_datetime_utc(oldest_netfilter)
                 }

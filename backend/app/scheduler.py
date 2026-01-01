@@ -1,11 +1,5 @@
 """
-Background scheduler - REFACTORED
-
-Architecture:
-1. IMPORT PHASE: Fetch logs from API and store in DB (NO correlation!)
-2. CORRELATION PHASE: Separate job that links logs together
-
-This fixes timing issues where rspamd arrives before postfix.
+Background scheduler
 """
 import logging
 import asyncio
@@ -29,10 +23,15 @@ logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
-# Track seen logs to avoid duplicates within session
 seen_postfix: Set[str] = set()
 seen_rspamd: Set[str] = set()
 seen_netfilter: Set[str] = set()
+
+last_fetch_run_time: Dict[str, Optional[datetime]] = {
+    'postfix': None,
+    'rspamd': None,
+    'netfilter': None
+}
 
 
 def is_blacklisted(email: Optional[str]) -> bool:
@@ -61,21 +60,10 @@ def is_blacklisted(email: Optional[str]) -> bool:
     return is_blocked
 
 
-# =============================================================================
-# PHASE 1: IMPORT LOGS (No correlation during import!)
-# =============================================================================
-
 async def fetch_and_store_postfix():
-    """
-    Fetch Postfix logs from API and store in DB.
-    NO correlation here - that happens in a separate job.
+    """Fetch Postfix logs from API and store in DB"""
+    last_fetch_run_time['postfix'] = datetime.now(timezone.utc)
     
-    BLACKLIST LOGIC:
-    When we see a blacklisted email in any log, we:
-    1. Mark that Queue ID as blacklisted
-    2. Delete ALL existing logs with that Queue ID from DB
-    3. Skip importing any future logs with that Queue ID
-    """
     try:
         logs = await mailcow_api.get_postfix_logs(count=settings.fetch_count_postfix)
         
@@ -87,7 +75,6 @@ async def fetch_and_store_postfix():
             skipped_blacklist = 0
             blacklisted_queue_ids: Set[str] = set()
             
-            # First pass: identify blacklisted queue IDs
             for log_entry in logs:
                 message = log_entry.get('message', '')
                 parsed = parse_postfix_message(message)
@@ -119,7 +106,6 @@ async def fetch_and_store_postfix():
                 
                 db.commit()
             
-            # Second pass: import non-blacklisted logs
             for log_entry in logs:
                 try:
                     time_str = str(log_entry.get('time', ''))
@@ -148,7 +134,6 @@ async def fetch_and_store_postfix():
                     sender = parsed.get('sender')
                     recipient = parsed.get('recipient')
                     
-                    # Create and save log (NO correlation here!)
                     postfix_log = PostfixLog(
                         time=timestamp,
                         program=log_entry.get('program'),
@@ -173,7 +158,6 @@ async def fetch_and_store_postfix():
                     logger.error(f"Error processing Postfix log: {e}")
                     continue
             
-            # Commit all at once
             db.commit()
             
             if new_count > 0:
@@ -182,7 +166,6 @@ async def fetch_and_store_postfix():
                     msg += f" (skipped {skipped_blacklist} blacklisted)"
                 logger.info(msg)
             
-            # Clear cache if too large
             if len(seen_postfix) > 10000:
                 seen_postfix.clear()
     
@@ -191,19 +174,9 @@ async def fetch_and_store_postfix():
 
 
 async def fetch_and_store_rspamd():
-    """
-    Fetch Rspamd logs from API and store in DB.
-    NO correlation here - that happens in a separate job.
+    """Fetch Rspamd logs from API and store in DB"""
+    last_fetch_run_time['rspamd'] = datetime.now(timezone.utc)
     
-    API returns:
-    - 'message-id' (with dash!) not 'message_id'
-    - 'sender_smtp' not 'from'
-    - 'rcpt_smtp' not 'rcpt'
-    
-    BLACKLIST LOGIC:
-    When we see a blacklisted email, we also delete any existing
-    correlations with that message_id to prevent orphaned data.
-    """
     try:
         logs = await mailcow_api.get_rspamd_logs(count=settings.fetch_count_rspamd)
         
@@ -218,16 +191,10 @@ async def fetch_and_store_rspamd():
             for log_entry in logs:
                 try:
                     unix_time = log_entry.get('unix_time', 0)
-                    
-                    # FIXED: API returns 'message-id' with DASH!
                     message_id = log_entry.get('message-id', '')
                     if message_id == 'undef' or not message_id:
                         message_id = None
-                    
-                    # FIXED: API returns 'sender_smtp' not 'from'!
                     sender = log_entry.get('sender_smtp')
-                    
-                    # FIXED: API returns 'rcpt_smtp' not 'rcpt'!
                     recipients = log_entry.get('rcpt_smtp', [])
                     
                     unique_id = f"{unix_time}:{message_id if message_id else 'no-id'}"
@@ -235,7 +202,6 @@ async def fetch_and_store_rspamd():
                     if unique_id in seen_rspamd:
                         continue
                     
-                    # Check blacklist - sender
                     if is_blacklisted(sender):
                         skipped_blacklist += 1
                         seen_rspamd.add(unique_id)
@@ -243,7 +209,6 @@ async def fetch_and_store_rspamd():
                             blacklisted_message_ids.add(message_id)
                         continue
                     
-                    # Check blacklist - any recipient
                     if recipients and any(is_blacklisted(r) for r in recipients):
                         skipped_blacklist += 1
                         seen_rspamd.add(unique_id)
@@ -251,13 +216,9 @@ async def fetch_and_store_rspamd():
                             blacklisted_message_ids.add(message_id)
                         continue
                     
-                    # Parse timestamp with timezone
                     timestamp = datetime.fromtimestamp(unix_time, tz=timezone.utc)
-                    
-                    # Detect direction
                     direction = detect_direction(log_entry)
                     
-                    # Create and save log (NO correlation here!)
                     rspamd_log = RspamdLog(
                         time=timestamp,
                         message_id=message_id,
@@ -287,9 +248,7 @@ async def fetch_and_store_rspamd():
                     logger.error(f"Error processing Rspamd log: {e}")
                     continue
             
-            # Delete correlations for blacklisted message IDs
             if blacklisted_message_ids:
-                # Get queue IDs from correlations before deleting
                 correlations_to_delete = db.query(MessageCorrelation).filter(
                     MessageCorrelation.message_id.in_(blacklisted_message_ids)
                 ).all()
@@ -299,12 +258,10 @@ async def fetch_and_store_rspamd():
                     if corr.queue_id:
                         queue_ids_to_delete.add(corr.queue_id)
                 
-                # Delete correlations
                 deleted_corr = db.query(MessageCorrelation).filter(
                     MessageCorrelation.message_id.in_(blacklisted_message_ids)
                 ).delete(synchronize_session=False)
                 
-                # Delete Postfix logs for those queue IDs
                 if queue_ids_to_delete:
                     deleted_postfix = db.query(PostfixLog).filter(
                         PostfixLog.queue_id.in_(queue_ids_to_delete)
@@ -316,7 +273,6 @@ async def fetch_and_store_rspamd():
                 if deleted_corr > 0:
                     logger.info(f"[BLACKLIST] Deleted {deleted_corr} correlations for blacklisted message IDs")
             
-            # Commit all at once
             db.commit()
             
             if new_count > 0:
@@ -325,7 +281,6 @@ async def fetch_and_store_rspamd():
                     msg += f" (skipped {skipped_blacklist} blacklisted)"
                 logger.info(msg)
             
-            # Clear cache if too large
             if len(seen_rspamd) > 10000:
                 seen_rspamd.clear()
     
@@ -333,68 +288,65 @@ async def fetch_and_store_rspamd():
         logger.error(f"[ERROR] Rspamd fetch error: {e}")
 
 
-def parse_netfilter_message(message: str) -> Dict[str, Any]:
-    """
-    Parse Netfilter log message to extract structured data.
-    
-    Examples:
-    - "9 more attempts in the next 600 seconds until 80.178.113.140/32 is banned"
-    - "80.178.113.140 matched rule id 3 (warning: 80.178.113.140.adsl.012.net.il[80.178.113.140]: SASL LOGIN authentication failed: ...)"
-    - "Banned 80.178.113.140 for 600 seconds"
-    """
+def parse_netfilter_message(message: str, priority: Optional[str] = None) -> Dict[str, Any]:
+
     result = {}
+    message_lower = message.lower()
     
-    # Extract IP address - multiple patterns
-    # Pattern 1: IP at start of message
     ip_match = re.match(r'^(\d+\.\d+\.\d+\.\d+)', message)
     if ip_match:
         result['ip'] = ip_match.group(1)
     
-    # Pattern 2: IP in "until X.X.X.X/32 is banned"
     if not result.get('ip'):
         ban_match = re.search(r'until\s+(\d+\.\d+\.\d+\.\d+)', message)
         if ban_match:
             result['ip'] = ban_match.group(1)
     
-    # Pattern 3: IP in brackets [X.X.X.X]
     if not result.get('ip'):
         bracket_match = re.search(r'\[(\d+\.\d+\.\d+\.\d+)\]', message)
         if bracket_match:
             result['ip'] = bracket_match.group(1)
     
-    # Pattern 4: "Banned X.X.X.X"
     if not result.get('ip'):
-        banned_match = re.search(r'Banned\s+(\d+\.\d+\.\d+\.\d+)', message)
+        banned_match = re.search(r'Ban(?:ned|ning)\s+(\d+\.\d+\.\d+\.\d+)', message, re.IGNORECASE)
         if banned_match:
             result['ip'] = banned_match.group(1)
     
-    # Extract username (sasl_username=xxx@yyy)
+    if not result.get('ip'):
+        cidr_match = re.search(r'Ban(?:ned|ning)\s+(\d+\.\d+\.\d+\.\d+/\d+)', message, re.IGNORECASE)
+        if cidr_match:
+            ip_part = cidr_match.group(1).split('/')[0]
+            result['ip'] = ip_part
+    
     username_match = re.search(r'sasl_username=([^\s,\)]+)', message)
     if username_match:
         result['username'] = username_match.group(1)
     
-    # Extract auth method (SASL LOGIN, SASL PLAIN, etc.)
     auth_match = re.search(r'SASL\s+(\w+)', message)
     if auth_match:
         result['auth_method'] = f"SASL {auth_match.group(1)}"
     
-    # Extract rule ID
     rule_match = re.search(r'rule id\s+(\d+)', message)
     if rule_match:
         result['rule_id'] = int(rule_match.group(1))
     
-    # Extract attempts left
     attempts_match = re.search(r'(\d+)\s+more\s+attempt', message)
     if attempts_match:
         result['attempts_left'] = int(attempts_match.group(1))
     
-    # Determine action
-    if 'is banned' in message.lower() or 'banned' in message.lower():
-        if 'more attempts' in message.lower():
+    if 'banning' in message_lower or 'banned' in message_lower:
+        if 'more attempts' in message_lower:
             result['action'] = 'warning'
         else:
             result['action'] = 'banned'
-    elif 'warning' in message.lower():
+    elif priority and priority.lower() == 'crit':
+        if 'unbanning' in message_lower or 'unban' in message_lower:
+            result['action'] = 'info'
+        elif 'banning' in message_lower:
+            result['action'] = 'banned'
+        else:
+            result['action'] = 'banned'
+    elif 'warning' in message_lower:
         result['action'] = 'warning'
     else:
         result['action'] = 'info'
@@ -403,35 +355,51 @@ def parse_netfilter_message(message: str) -> Dict[str, Any]:
 
 
 async def fetch_and_store_netfilter():
-    """Fetch Netfilter logs from API and store in DB."""
+    """Fetch Netfilter logs from API and store in DB"""
+    last_fetch_run_time['netfilter'] = datetime.now(timezone.utc)
+    
     try:
+        logger.debug(f"[NETFILTER] Starting fetch (count: {settings.fetch_count_netfilter})")
         logs = await mailcow_api.get_netfilter_logs(count=settings.fetch_count_netfilter)
         
         if not logs:
+            logger.debug("[NETFILTER] No logs returned from API")
             return
+        
+        logger.debug(f"[NETFILTER] Received {len(logs)} logs from API")
         
         with get_db_context() as db:
             new_count = 0
+            skipped_count = 0
             
             for log_entry in logs:
                 try:
                     time_val = log_entry.get('time', 0)
                     message = log_entry.get('message', '')
-                    
-                    # Parse the message to extract structured data
-                    parsed = parse_netfilter_message(message)
-                    
-                    ip = parsed.get('ip', '')
-                    unique_id = f"{time_val}:{ip}:{message[:50]}"
+                    priority = log_entry.get('priority', 'info')
+                    unique_id = f"{time_val}:{priority}:{message}"
                     
                     if unique_id in seen_netfilter:
+                        skipped_count += 1
                         continue
                     
                     timestamp = datetime.fromtimestamp(time_val, tz=timezone.utc)
+                    existing = db.query(NetfilterLog).filter(
+                        NetfilterLog.message == message,
+                        NetfilterLog.time == timestamp,
+                        NetfilterLog.priority == priority
+                    ).first()
+                    
+                    if existing:
+                        skipped_count += 1
+                        seen_netfilter.add(unique_id)
+                        continue
+                    
+                    parsed = parse_netfilter_message(message, priority=priority)
                     
                     netfilter_log = NetfilterLog(
                         time=timestamp,
-                        priority=log_entry.get('priority', 'info'),
+                        priority=priority,
                         message=message,
                         ip=parsed.get('ip'),
                         username=parsed.get('username'),
@@ -447,37 +415,44 @@ async def fetch_and_store_netfilter():
                     new_count += 1
                     
                 except Exception as e:
-                    logger.error(f"Error processing Netfilter log: {e}")
+                    logger.error(f"[NETFILTER] Error processing log entry: {e}")
                     continue
             
             db.commit()
             
             if new_count > 0:
-                logger.info(f"[OK] Imported {new_count} Netfilter logs")
+                logger.info(f"[OK] Imported {new_count} Netfilter logs (skipped {skipped_count} duplicates)")
+            elif skipped_count > 0:
+                logger.debug(f"[NETFILTER] All {skipped_count} logs were duplicates, nothing new to import")
             
             if len(seen_netfilter) > 10000:
+                logger.debug("[NETFILTER] Clearing seen_netfilter cache (size > 10000)")
                 seen_netfilter.clear()
     
     except Exception as e:
-        logger.error(f"[ERROR] Netfilter fetch error: {e}")
+        logger.error(f"[ERROR] Netfilter fetch error: {e}", exc_info=True)
 
 
 async def fetch_all_logs():
     """Fetch all log types concurrently"""
     try:
-        await asyncio.gather(
+        logger.debug("[FETCH] Starting fetch_all_logs")
+        results = await asyncio.gather(
             fetch_and_store_postfix(),
             fetch_and_store_rspamd(),
             fetch_and_store_netfilter(),
             return_exceptions=True
         )
+        
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                log_type = ["Postfix", "Rspamd", "Netfilter"][i]
+                logger.error(f"[ERROR] {log_type} fetch failed: {result}", exc_info=result)
+        
+        logger.debug("[FETCH] Completed fetch_all_logs")
     except Exception as e:
-        logger.error(f"[ERROR] Fetch all logs error: {e}")
+        logger.error(f"[ERROR] Fetch all logs error: {e}", exc_info=True)
 
-
-# =============================================================================
-# PHASE 2: CORRELATION (Separate from import!)
-# =============================================================================
 
 async def cleanup_blacklisted_queues():
     """
@@ -497,12 +472,9 @@ async def cleanup_blacklisted_queues():
     
     try:
         with get_db_context() as db:
-            # Find queue_ids where recipient is blacklisted
             blacklisted_queue_ids = set()
             
-            # Query Postfix logs that have a recipient in the blacklist
             for email in blacklist:
-                # Find logs where recipient matches this blacklisted email
                 logs_with_blacklisted_recipient = db.query(PostfixLog).filter(
                     PostfixLog.recipient == email,
                     PostfixLog.queue_id.isnot(None)
@@ -515,7 +487,6 @@ async def cleanup_blacklisted_queues():
             if not blacklisted_queue_ids:
                 return
             
-            # Delete ALL Postfix logs with these queue_ids
             deleted_count = 0
             for queue_id in blacklisted_queue_ids:
                 count = db.query(PostfixLog).filter(
@@ -550,7 +521,6 @@ async def run_correlation():
     
     try:
         with get_db_context() as db:
-            # Find Rspamd logs without correlation (limit to avoid overload)
             uncorrelated_rspamd = db.query(RspamdLog).filter(
                 RspamdLog.correlation_key.is_(None),
                 RspamdLog.message_id.isnot(None),
@@ -566,9 +536,7 @@ async def run_correlation():
             
             for rspamd_log in uncorrelated_rspamd:
                 try:
-                    # Check blacklist (for legacy logs that were imported before blacklist was set)
                     if is_blacklisted(rspamd_log.sender_smtp):
-                        # Mark as correlated so we don't keep trying
                         rspamd_log.correlation_key = "BLACKLISTED"
                         db.commit()
                         skipped_blacklist += 1

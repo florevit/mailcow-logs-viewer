@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from .config import settings
+from .config import settings, set_cached_active_domains
 from .database import init_db, check_db_connection
 from .scheduler import start_scheduler, stop_scheduler
 from .mailcow_api import mailcow_api
@@ -17,10 +17,10 @@ from .routers import logs, stats
 from .routers import export as export_router
 from .migrations import run_migrations
 from .auth import BasicAuthMiddleware
+from .version import __version__
 
 logger = logging.getLogger(__name__)
 
-# Import status and messages routers
 try:
     from .routers import status as status_router
     from .routers import messages as messages_router
@@ -63,11 +63,21 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize database: {e}")
         raise
     
-    # Test Mailcow API connection
+    # Test Mailcow API connection and fetch active domains
     try:
         api_ok = await mailcow_api.test_connection()
         if not api_ok:
             logger.warning("Mailcow API connection test failed - check your configuration")
+        else:
+            try:
+                active_domains = await mailcow_api.get_active_domains()
+                if active_domains:
+                    set_cached_active_domains(active_domains)
+                    logger.info(f"Loaded {len(active_domains)} active domains from Mailcow API")
+                else:
+                    logger.warning("No active domains found in Mailcow - check your configuration")
+            except Exception as e:
+                logger.error(f"Failed to fetch active domains: {e}")
     except Exception as e:
         logger.error(f"Mailcow API test failed: {e}")
     
@@ -92,7 +102,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Mailcow Logs Viewer",
     description="Modern dashboard for viewing and analyzing Mailcow mail server logs",
-    version="1.2.0",
+    version=__version__,
     lifespan=lifespan
 )
 
@@ -157,7 +167,7 @@ async def health_check():
     return {
         "status": "healthy" if db_ok else "unhealthy",
         "database": "connected" if db_ok else "disconnected",
-        "version": "1.2.0",
+        "version": __version__,
         "config": {
             "fetch_interval": settings.fetch_interval,
             "retention_days": settings.retention_days,
@@ -173,7 +183,7 @@ async def app_info():
     """Application information endpoint"""
     return {
         "name": "Mailcow Logs Viewer",
-        "version": "1.2.0",
+        "version": __version__,
         "mailcow_url": settings.mailcow_url,
         "local_domains": settings.local_domains_list,
         "fetch_interval": settings.fetch_interval,
