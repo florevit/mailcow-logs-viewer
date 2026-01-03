@@ -3,7 +3,7 @@ API endpoints for system status and health monitoring
 """
 import logging
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
@@ -31,6 +31,49 @@ app_version_cache = {
     "update_available": False,
     "changelog": None
 }
+
+async def check_app_version_update():
+    """
+    Check for app version updates from GitHub and update the cache.
+    This function can be called from both the API endpoint and the scheduler.
+    """
+    global app_version_cache
+    
+    logger.info("Checking app version and updates from GitHub...")
+    
+    # Check GitHub for latest version
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.github.com/repos/ShlomiPorush/mailcow-logs-viewer/releases/latest"
+            )
+            
+            if response.status_code == 200:
+                release_data = response.json()
+                latest_version = release_data.get('tag_name', 'unknown')
+                # Remove 'v' prefix if present
+                if latest_version.startswith('v'):
+                    latest_version = latest_version[1:]
+                changelog = release_data.get('body', '')
+                
+                app_version_cache["latest_version"] = latest_version
+                app_version_cache["changelog"] = changelog
+                
+                # Compare versions (simple string comparison)
+                app_version_cache["update_available"] = app_version_cache["current_version"] != latest_version
+                
+                logger.info(f"App version check: Current={app_version_cache['current_version']}, Latest={latest_version}")
+            else:
+                logger.warning(f"GitHub API returned status {response.status_code}")
+                app_version_cache["latest_version"] = "unknown"
+                app_version_cache["update_available"] = False
+                
+    except Exception as e:
+        logger.error(f"Failed to check GitHub for app updates: {e}")
+        app_version_cache["latest_version"] = "unknown"
+        app_version_cache["update_available"] = False
+    
+    app_version_cache["checked_at"] = datetime.utcnow()
 
 @router.get("/status/containers")
 async def get_containers_status():
@@ -173,54 +216,24 @@ async def get_version_status():
 
 
 @router.get("/status/app-version")
-async def get_app_version_status():
+async def get_app_version_status(force: bool = Query(False, description="Force a fresh version check")):
     """
     Get current app version and check for updates from GitHub
-    Checks GitHub once per day and caches the result
+    Returns cached result (updated periodically by scheduler)
+    
+    Args:
+        force: If True, force a fresh check regardless of cache age
     """
     try:
         global app_version_cache
         
-        # Check if we need to refresh the cache (once per day)
+        # Force check or check if cache is stale (more than 1 day old) and refresh if needed
+        # This is a fallback in case the scheduler hasn't run yet
         now = datetime.utcnow()
-        if (app_version_cache["checked_at"] is None or 
+        if (force or 
+            app_version_cache["checked_at"] is None or 
             now - app_version_cache["checked_at"] > timedelta(days=1)):
-            
-            logger.info("Checking app version and updates from GitHub...")
-            
-            # Check GitHub for latest version
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.get(
-                        "https://api.github.com/repos/ShlomiPorush/mailcow-logs-viewer/releases/latest"
-                    )
-                    
-                    if response.status_code == 200:
-                        release_data = response.json()
-                        latest_version = release_data.get('tag_name', 'unknown')
-                        # Remove 'v' prefix if present
-                        if latest_version.startswith('v'):
-                            latest_version = latest_version[1:]
-                        changelog = release_data.get('body', '')
-                        
-                        app_version_cache["latest_version"] = latest_version
-                        app_version_cache["changelog"] = changelog
-                        
-                        # Compare versions (simple string comparison)
-                        app_version_cache["update_available"] = app_version_cache["current_version"] != latest_version
-                        
-                        logger.info(f"App version check: Current={app_version_cache['current_version']}, Latest={latest_version}")
-                    else:
-                        logger.warning(f"GitHub API returned status {response.status_code}")
-                        app_version_cache["latest_version"] = "unknown"
-                        app_version_cache["update_available"] = False
-                        
-            except Exception as e:
-                logger.error(f"Failed to check GitHub for app updates: {e}")
-                app_version_cache["latest_version"] = "unknown"
-                app_version_cache["update_available"] = False
-            
-            app_version_cache["checked_at"] = now
+            await check_app_version_update()
         
         return {
             "current_version": app_version_cache["current_version"],

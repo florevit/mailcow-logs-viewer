@@ -18,6 +18,7 @@ from .database import get_db_context
 from .mailcow_api import mailcow_api
 from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from .correlation import detect_direction, parse_postfix_message
+from .routers.status import check_app_version_update
 
 logger = logging.getLogger(__name__)
 
@@ -1165,6 +1166,17 @@ def start_scheduler():
             replace_existing=True
         )
         
+        # Job 7: Check app version updates (every 6 hours, starting immediately)
+        scheduler.add_job(
+            check_app_version_update,
+            trigger=IntervalTrigger(hours=6),
+            id='check_app_version',
+            name='Check App Version Updates',
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=datetime.now(timezone.utc)  # Run immediately on startup
+        )
+        
         scheduler.start()
         
         logger.info("[OK] Scheduler started")
@@ -1173,6 +1185,7 @@ def start_scheduler():
         logger.info(f"   [COMPLETE] Incomplete correlations: every {settings.correlation_check_interval}s")
         logger.info(f"   [STATUS] Update final status: every {settings.correlation_check_interval}s (max age: {settings.max_correlation_age_minutes}min)")
         logger.info(f"   [EXPIRE] Old correlations: every 60s (expire after {settings.max_correlation_age_minutes}min)")
+        logger.info(f"   [VERSION] Check app version updates: every 6 hours")
         
         # Log blacklist status
         blacklist = settings.blacklist_emails_list

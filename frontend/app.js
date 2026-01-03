@@ -2815,6 +2815,93 @@ async function loadSettings() {
     }
 }
 
+function updateVersionInfoUI(versionInfo) {
+    // Find the container with Latest Version by searching for the label
+    const allContainers = document.querySelectorAll('#settings-content .p-4.bg-gray-50');
+    let latestVersionContainer = null;
+    
+    for (const container of allContainers) {
+        const label = container.querySelector('.text-xs.uppercase');
+        if (label && label.textContent.trim() === 'LATEST VERSION') {
+            latestVersionContainer = container;
+            break;
+        }
+    }
+    
+    if (!latestVersionContainer) {
+        return;
+    }
+    
+    // Update version text
+    const versionTextEl = latestVersionContainer.querySelector('.text-lg.font-semibold');
+    if (versionTextEl) {
+        versionTextEl.textContent = versionInfo.latest_version ? `v${versionInfo.latest_version}` : 'Checking...';
+    }
+    
+    // Update or create badge
+    const badgeContainer = latestVersionContainer.querySelector('.flex.items-center');
+    if (badgeContainer) {
+        // Remove existing badges (but keep the button)
+        const existingBadges = Array.from(badgeContainer.querySelectorAll('span.px-2.py-1.rounded.text-xs'));
+        existingBadges.forEach(badge => {
+            badge.remove();
+        });
+        
+        // Add new badge if needed
+        if (versionInfo.update_available) {
+            const badge = document.createElement('span');
+            badge.className = 'px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 rounded text-xs font-medium';
+            badge.textContent = 'Update Available';
+            const button = badgeContainer.querySelector('button');
+            if (button) {
+                badgeContainer.insertBefore(badge, button);
+            } else {
+                badgeContainer.appendChild(badge);
+            }
+        } else if (versionInfo.latest_version && !versionInfo.update_available) {
+            const badge = document.createElement('span');
+            badge.className = 'px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300 rounded text-xs font-medium';
+            badge.textContent = 'Up to Date';
+            const button = badgeContainer.querySelector('button');
+            if (button) {
+                badgeContainer.insertBefore(badge, button);
+            } else {
+                badgeContainer.appendChild(badge);
+            }
+        }
+    }
+    
+    // Update or create update message
+    const versionSection = latestVersionContainer.closest('.bg-white, .dark\\:bg-gray-800');
+    if (versionSection) {
+        // Remove existing update message
+        const existingMessages = versionSection.querySelectorAll('.bg-green-50, .dark\\:bg-green-900\\/20');
+        existingMessages.forEach(msg => {
+            if (msg.textContent.includes('Update available')) {
+                msg.remove();
+            }
+        });
+        
+        // Add new update message if update is available
+        if (versionInfo.update_available) {
+            const gridContainer = versionSection.querySelector('.grid.grid-cols-1');
+            if (gridContainer && gridContainer.parentNode) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = 'mt-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg';
+                messageDiv.innerHTML = `
+                    <p class="text-sm text-green-800 dark:text-green-300">
+                        <strong>Update available!</strong> A new version (v${versionInfo.latest_version}) is available on GitHub.
+                    </p>
+                    <a href="https://github.com/ShlomiPorush/mailcow-logs-viewer/releases/latest" target="_blank" rel="noopener noreferrer" class="text-sm text-green-600 dark:text-green-400 hover:underline mt-2 inline-block">
+                        View release notes →
+                    </a>
+                `;
+                gridContainer.parentNode.insertBefore(messageDiv, gridContainer.nextSibling);
+            }
+        }
+    }
+}
+
 function renderSettings(content, data) {
     const config = data.configuration || {};
     const appVersion = data.app_version || 'Unknown';
@@ -2839,7 +2926,7 @@ function renderSettings(content, data) {
                     </div>
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Latest Version</p>
-                        <div class="flex items-center gap-2">
+                        <div class="flex items-center gap-2 flex-wrap">
                             <p class="text-lg font-semibold text-gray-900 dark:text-white">${versionInfo.latest_version ? `v${versionInfo.latest_version}` : 'Checking...'}</p>
                             ${versionInfo.update_available ? `
                                 <span class="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300 rounded text-xs font-medium">
@@ -2850,6 +2937,12 @@ function renderSettings(content, data) {
                                     Up to Date
                                 </span>
                             ` : ''}
+                            <button id="check-version-btn" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors duration-200 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <svg id="check-version-icon" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                <span id="check-version-text">Check Now</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -2972,6 +3065,99 @@ function renderSettings(content, data) {
             </div>
         </div>
     `;
+    
+    // Add event listener for version check button
+    const checkVersionBtn = document.getElementById('check-version-btn');
+    if (checkVersionBtn) {
+        // Use onclick to avoid duplicate listeners (simpler approach)
+        checkVersionBtn.onclick = async () => {
+            const btn = checkVersionBtn;
+            const icon = document.getElementById('check-version-icon');
+            const text = document.getElementById('check-version-text');
+            
+            // Disable button and show loading state
+            btn.disabled = true;
+            if (icon) {
+                icon.classList.add('animate-spin');
+            }
+            if (text) {
+                text.textContent = 'Checking...';
+            }
+            
+            try {
+                // Force check for updates
+                const response = await authenticatedFetch('/api/status/app-version?force=true');
+                const versionInfo = await response.json();
+                
+                // Update cache
+                versionInfoCache.version_info = versionInfo;
+                
+                // Update UI directly without reloading the page
+                updateVersionInfoUI(versionInfo);
+                
+                // Show success state - green button with "Done"
+                btn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                btn.classList.add('bg-green-500', 'hover:bg-green-600');
+                if (text) {
+                    text.textContent = 'Done';
+                }
+                if (icon) {
+                    icon.classList.remove('animate-spin');
+                    // Change icon to checkmark
+                    const path = icon.querySelector('path');
+                    if (path) {
+                        path.setAttribute('d', 'M5 13l4 4L19 7');
+                    }
+                }
+                
+                // Re-enable button immediately after success (but keep green color)
+                btn.disabled = false;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    btn.classList.remove('bg-green-500', 'hover:bg-green-600');
+                    btn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                    if (text) {
+                        text.textContent = 'Check Now';
+                    }
+                    if (icon) {
+                        const path = icon.querySelector('path');
+                        if (path) {
+                            path.setAttribute('d', 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15');
+                        }
+                    }
+                }, 3000);
+                
+            } catch (error) {
+                console.error('Failed to check version:', error);
+                // Show error message
+                btn.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                btn.classList.add('bg-red-500', 'hover:bg-red-600');
+                if (text) {
+                    text.textContent = 'Error';
+                }
+                if (icon) {
+                    icon.classList.remove('animate-spin');
+                }
+                
+                // Reset button after 2 seconds
+                setTimeout(() => {
+                    btn.classList.remove('bg-red-500', 'hover:bg-red-600');
+                    btn.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                    if (text) {
+                        text.textContent = 'Check Now';
+                    }
+                    if (icon) {
+                        const path = icon.querySelector('path');
+                        if (path) {
+                            path.setAttribute('d', 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15');
+                        }
+                    }
+                    btn.disabled = false;
+                }, 2000);
+            }
+        };
+    }
 }
 
 function renderImportCard(title, data, color) {

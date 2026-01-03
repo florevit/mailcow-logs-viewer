@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.5] - 2026-01-04
+
+### Added
+
+#### Version Check Improvements
+- **Periodic Version Check**: Version check now runs automatically every 6 hours (instead of only on container startup)
+  - Background scheduler job checks for app updates from GitHub
+  - Runs immediately on startup, then every 6 hours
+  - Ensures version information stays up-to-date without manual intervention
+  - Version check job appears in Status page
+
+- **Manual Version Check Button**: Added "Check Now" button in Settings page
+  - Located next to "Latest Version" badge
+  - Allows users to manually trigger version check at any time
+
+### Changed
+
+#### Version Check Behavior
+- **Background Updates**: Version check endpoint now supports `force` parameter to bypass cache
+- **UI Updates**: Version information updates in real-time without page refresh
+  - Latest version display updates immediately
+  - Badge status ("Update Available" / "Up to Date") updates dynamically
+  - Update notification message appears/disappears based on check results
+
+---
+
 ## [1.4.4] - 2026-01-04
 
 ### Added
