@@ -18,7 +18,7 @@ A modern, self-hosted dashboard for viewing and analyzing Mailcow mail server lo
 
 ### 📊 Dashboard
 - Real-time statistics (24h / 7d / 30d)
-- Messages, spam, failed deliveries, auth failures counts
+- Messages, spam, failed deliveries, auth failures, internal emails counts
 - Container status overview
 - Storage usage with visual indicator
 - Quick search across all logs
@@ -28,17 +28,19 @@ A modern, self-hosted dashboard for viewing and analyzing Mailcow mail server lo
 - Unified view combining Postfix + Rspamd data
 - Smart correlation linking related logs
 - Multiple recipients display per email
-- Inbound/Outbound direction detection
+- Direction detection (Inbound/Outbound/Internal)
+- Internal email detection (local delivery with relay=dovecot)
 - Status tracking (delivered, bounced, deferred, expired, spam)
 - Filter by sender, recipient, user, IP, direction
 - Result count display
 - CSV export
+- Smart auto-refresh (skips when searching/filtering)
 
 ### 📋 Message Details Modal
-- **Overview tab**: Message summary with all recipients
-- **Logs tab**: Complete Postfix delivery timeline with error summary
+- **Overview tab**: Message summary with all recipients (includes addresses with `+` signs)
+- **Logs tab**: Complete Postfix delivery timeline with error summary and relay information
 - **Spam Analysis tab**: Full Rspamd symbols with scores and descriptions
-- **Security tab**: Related Netfilter events for sender IP
+- **Security tab**: All Netfilter security events for sender's IP address (up to 100 most recent)
 
 ### 🔒 Security (Netfilter)
 - Failed authentication attempts
@@ -66,11 +68,12 @@ A modern, self-hosted dashboard for viewing and analyzing Mailcow mail server lo
 - 🔐 Built-in Basic Authentication
 - 🌙 Dark mode
 - 📱 Responsive design
-- 🔄 Auto-refresh
+- 🔄 Smart auto-refresh (respects user activity)
 - 📥 CSV export for all log types
 - 🚫 Email blacklist (hide specific addresses from display)
 - 🧹 Automatic old log cleanup
 - ⏰ Correlation expiration (marks old incomplete correlations)
+- 🔄 Background jobs for correlation status updates
 
 ---
 
