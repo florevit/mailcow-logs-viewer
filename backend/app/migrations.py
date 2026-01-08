@@ -240,6 +240,136 @@ def add_is_complete_column(db: Session):
         db.rollback()
 
 
+def ensure_domain_dns_checks_table(db: Session):
+    """Ensure domain_dns_checks table exists"""
+    logger.info("Checking if domain_dns_checks table exists...")
+    
+    try:
+        result = db.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'domain_dns_checks'
+            );
+        """))
+        
+        table_exists = result.fetchone()[0]
+        
+        if table_exists:
+            logger.info("domain_dns_checks table already exists")
+            return
+        
+        logger.info("Creating domain_dns_checks table...")
+        
+        try:
+            db.execute(text("""
+                CREATE TABLE domain_dns_checks (
+                    id SERIAL PRIMARY KEY,
+                    domain_name VARCHAR(255) NOT NULL UNIQUE,
+                    spf_check JSONB,
+                    dkim_check JSONB,
+                    dmarc_check JSONB,
+                    checked_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_domain_dns_checks_domain 
+                ON domain_dns_checks(domain_name);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_domain_dns_checks_checked_at 
+                ON domain_dns_checks(checked_at);
+            """))
+            
+            db.commit()
+            logger.info("✓ domain_dns_checks table created successfully")
+            
+        except Exception as create_error:
+            db.rollback()
+
+            if "duplicate key value violates unique constraint" in str(create_error).lower():
+                logger.warning("Detected PostgreSQL artifact, cleaning up...")
+                
+                try:
+                    # Clean up ALL artifacts
+                    db.execute(text("DROP SEQUENCE IF EXISTS domain_dns_checks_id_seq CASCADE;"))
+                    db.execute(text("DROP TABLE IF EXISTS domain_dns_checks CASCADE;"))
+                    db.execute(text("DROP TYPE IF EXISTS domain_dns_checks CASCADE;"))
+                    db.commit()
+                    logger.info("Cleaned up PostgreSQL artifacts")
+
+                    # Retry
+                    db.execute(text("""
+                        CREATE TABLE domain_dns_checks (
+                            id SERIAL PRIMARY KEY,
+                            domain_name VARCHAR(255) NOT NULL UNIQUE,
+                            spf_check JSONB,
+                            dkim_check JSONB,
+                            dmarc_check JSONB,
+                            checked_at TIMESTAMP NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_domain_dns_checks_domain 
+                        ON domain_dns_checks(domain_name);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_domain_dns_checks_checked_at 
+                        ON domain_dns_checks(checked_at);
+                    """))
+                    
+                    db.commit()
+                    logger.info("✓ domain_dns_checks table created after cleanup")
+                    
+                except Exception as retry_error:
+                    logger.error(f"Failed after cleanup: {retry_error}")
+                    db.rollback()
+                    raise
+            else:
+                logger.error(f"Failed to create table: {create_error}")
+                raise
+        
+    except Exception as e:
+        logger.error(f"Error ensuring domain_dns_checks table: {e}")
+        db.rollback()
+
+
+def add_is_full_check_column(db: Session):
+    """Add is_full_check column to domain_dns_checks"""
+    logger.info("Checking if is_full_check column exists...")
+    
+    try:
+        result = db.execute(text("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='domain_dns_checks' 
+            AND column_name='is_full_check'
+        """))
+        
+        if result.fetchone() is None:
+            logger.info("Adding is_full_check column...")
+            db.execute(text("""
+                ALTER TABLE domain_dns_checks 
+                ADD COLUMN is_full_check BOOLEAN DEFAULT FALSE
+            """))
+            db.commit()
+            logger.info("is_full_check column added")
+        else:
+            logger.info("is_full_check column already exists")
+        
+    except Exception as e:
+        logger.error(f"Error adding is_full_check column: {e}")
+        db.rollback()
+
+
 def run_migrations():
     """
     Run all database migrations and maintenance tasks
@@ -255,6 +385,10 @@ def run_migrations():
         # Add is_complete column if missing (for tracking correlation completion)
         add_is_complete_column(db)
         
+        # Domain DNS table
+        ensure_domain_dns_checks_table(db)
+        add_is_full_check_column(db)
+
         # Clean up duplicate correlations
         removed = cleanup_duplicate_correlations(db)
         

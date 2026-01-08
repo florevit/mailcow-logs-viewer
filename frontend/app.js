@@ -959,12 +959,14 @@ async function loadRecentActivity() {
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
                         </svg>
                         <span class="text-sm text-gray-600 dark:text-gray-300">${escapeHtml(msg.recipient || 'Unknown')}</span>
-                        ${msg.direction ? `<span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${getDirectionClass(msg.direction)}">${msg.direction}</span>` : ''}
                     </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400 truncate" title="${escapeHtml(msg.subject || 'No subject')}">${escapeHtml(msg.subject || 'No subject')}</p>
                 </div>
-                <div class="flex items-center gap-2 flex-shrink-0 sm:justify-end">
-                    <span class="inline-block px-2 py-1 text-xs font-medium rounded ${getStatusClass(msg.status)}">${msg.status || 'unknown'}</span>
+                <div class="flex flex-col items-end gap-1 flex-shrink-0">
+                    <div class="flex items-center gap-2">
+                        <span class="inline-block px-2 py-1 text-xs font-medium rounded ${getStatusClass(msg.status)}">${msg.status || 'unknown'}</span>
+                        ${msg.direction ? `<span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${getDirectionClass(msg.direction)}">${msg.direction}</span>` : ''}
+                    </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">${formatTime(msg.time)}</p>
                 </div>
             </div>
@@ -1894,11 +1896,13 @@ function renderStatusJobs(jobs) {
     const container = document.getElementById('status-jobs');
     container.innerHTML = `
         <div class="space-y-3">
-            ${renderJobCard('Fetch Logs', jobs.fetch_logs, 'Imports logs from Mailcow API')}
-            ${renderJobCard('Complete Correlations', jobs.complete_correlations, 'Links Postfix logs to messages')}
-            ${renderJobCard('Update Final Status', jobs.update_final_status, 'Updates final status for correlations with late-arriving Postfix logs')}
-            ${renderJobCard('Expire Correlations', jobs.expire_correlations, 'Marks old incomplete correlations as expired')}
-            ${renderJobCard('Cleanup Old Logs', jobs.cleanup_logs, 'Removes logs older than retention period')}
+            ${renderJobCard('Fetch Logs', jobs.fetch_logs)}
+            ${renderJobCard('Complete Correlations', jobs.complete_correlations)}
+            ${renderJobCard('Update Final Status', jobs.update_final_status)}
+            ${renderJobCard('Expire Correlations', jobs.expire_correlations)}
+            ${renderJobCard('Cleanup Logs', jobs.cleanup_logs)}
+            ${renderJobCard('Check App Version', jobs.check_app_version)}
+            ${renderJobCard('DNS Check (All Domains)', jobs.dns_check)}
         </div>
     `;
 }
@@ -2994,6 +2998,29 @@ async function loadDomains() {
 function renderDomains(container, data) {
     const domains = data.domains || [];
     
+    const dnsCheckInfo = document.getElementById('dns-check-info');
+    if (dnsCheckInfo) {
+        const lastCheck = data.last_dns_check 
+            ? formatTime(data.last_dns_check)
+            : '<span class="text-gray-400">Never</span>';
+        
+        dnsCheckInfo.innerHTML = `
+            <div class="text-right">
+                <p class="text-xs text-gray-500 dark:text-gray-400">Last checked:</p>
+                <p class="text-sm font-medium text-gray-900 dark:text-white">${lastCheck}</p>
+            </div>
+            <button 
+                id="check-all-dns-btn"
+                onclick="checkAllDomainsDNS()" 
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition text-sm font-medium flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                Check Now
+            </button>
+        `;
+    }
+    
     if (domains.length === 0) {
         container.innerHTML = `
             <div class="text-center py-12">
@@ -3324,12 +3351,31 @@ function renderDomainAccordionRow(domain) {
                 
                 <!-- DNS Checks -->
                 <div class="p-6">
-                    <h4 class="text-sm font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                        <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
-                        </svg>
-                        DNS Security Records
-                    </h4>
+                    <div class="flex items-center justify-between mb-4">
+                        <h4 class="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                            <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                            </svg>
+                            DNS Security Records
+                        </h4>
+                        <div class="flex items-center gap-3">
+                            <div class="text-right">
+                                <p class="text-xs text-gray-500 dark:text-gray-400">Last checked:</p>
+                                <p class="text-xs font-medium text-gray-900 dark:text-white">
+                                    ${dns.checked_at ? formatTime(dns.checked_at) : '<span class="text-gray-400">Not checked</span>'}
+                                </p>
+                            </div>
+                            <button 
+                                onclick="event.stopPropagation(); checkSingleDomainDNS('${escapeHtml(domain.domain_name)}')"
+                                class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition flex items-center gap-1.5"
+                                title="Check DNS for this domain">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                Check
+                            </button>
+                        </div>
+                    </div>
                     <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                         ${renderDNSCheck('SPF', spf)}
                         ${renderDNSCheck('DKIM', dkim)}
@@ -3427,6 +3473,165 @@ function renderDNSCheck(type, check) {
         </div>
     `;
 }
+
+let dnsCheckInProgress = false;
+
+async function checkAllDomainsDNS() {
+    if (dnsCheckInProgress) {
+        showToast('DNS check already in progress', 'warning');
+        return;
+    }
+    
+    const button = document.getElementById('check-all-dns-btn');
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = '<svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Checking...';
+    }
+    
+    dnsCheckInProgress = true;
+    
+    try {
+        const response = await authenticatedFetch('/api/domains/check-all-dns', {
+            method: 'POST'
+        });
+        
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            showToast(`✓ Checked ${result.domains_checked} domains`, 'success');
+            setTimeout(() => loadDomains(), 1000);
+        } else {
+            showToast('DNS check failed', 'error');
+        }
+    } catch (error) {
+        console.error('Failed:', error);
+        showToast('Failed to check DNS', 'error');
+    } finally {
+        dnsCheckInProgress = false;
+        
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg> Check Now';
+        }
+    }
+}
+
+
+async function checkSingleDomainDNS(domainName) {
+    if (dnsCheckInProgress) {
+        showToast('DNS check already in progress', 'warning');
+        return;
+    }
+    
+    dnsCheckInProgress = true;
+    showToast(`Checking DNS for ${domainName}...`, 'info');
+    
+    // Find and update the button
+    const domainId = `domain-${domainName.replace(/\./g, '-')}`;
+    const detailsDiv = document.getElementById(`${domainId}-details`);
+    
+    try {
+        const response = await authenticatedFetch(`/api/domains/${encodeURIComponent(domainName)}/check-dns`, {
+            method: 'POST'
+        });
+        
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            showToast(`✓ DNS checked for ${domainName}`, 'success');
+            
+            // Update only this domain's DNS section
+            if (detailsDiv) {
+                const dnsSection = detailsDiv.querySelector('.p-6:last-child');
+                if (dnsSection) {
+                    // Get updated domain data
+                    const domainsResponse = await authenticatedFetch('/api/domains/all');
+                    const domainsData = await domainsResponse.json();
+                    const updatedDomain = domainsData.domains.find(d => d.domain_name === domainName);
+                    
+                    if (updatedDomain) {
+                        // Re-render just the DNS section
+                        const dns = updatedDomain.dns_checks || {};
+                        const spf = dns.spf || { status: 'unknown', message: 'Not checked' };
+                        const dkim = dns.dkim || { status: 'unknown', message: 'Not checked' };
+                        const dmarc = dns.dmarc || { status: 'unknown', message: 'Not checked' };
+                        
+                        dnsSection.innerHTML = `
+                            <div class="flex items-center justify-between mb-4">
+                                <h4 class="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                                    </svg>
+                                    DNS Security Records
+                                </h4>
+                                <div class="flex items-center gap-3">
+                                    <div class="text-right">
+                                        <p class="text-xs text-gray-500 dark:text-gray-400">Last checked:</p>
+                                        <p class="text-xs font-medium text-gray-900 dark:text-white">
+                                            ${dns.checked_at ? formatTime(dns.checked_at) : '<span class="text-gray-400">Not checked</span>'}
+                                        </p>
+                                    </div>
+                                    <button 
+                                        data-domain="${escapeHtml(updatedDomain.domain_name)}"
+                                        onclick="event.stopPropagation(); checkSingleDomainDNS(this.dataset.domain)"
+                                        class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition flex items-center gap-1.5"
+                                        title="Check DNS for this domain">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                        </svg>
+                                        Check
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                                ${renderDNSCheck('SPF', spf)}
+                                ${renderDNSCheck('DKIM', dkim)}
+                                ${renderDNSCheck('DMARC', dmarc)}
+                            </div>
+                        `;
+                        
+                        // Update inline badges in summary row
+                        const summaryRow = document.querySelector(`[onclick*="toggleDomainDetails('${domainId}')"]`);
+                        if (summaryRow) {
+                            const getStatusIcon = (status) => {
+                                if (status === 'success') return '<span class="text-green-500" title="OK">✓</span>';
+                                if (status === 'warning') return '<span class="text-amber-500" title="Warning">⚠</span>';
+                                if (status === 'error') return '<span class="text-red-500" title="Error">✗</span>';
+                                return '<span class="text-gray-400" title="Unknown">?</span>';
+                            };
+                            
+                            const badgesContainer = summaryRow.querySelector('.flex.items-center.gap-2.text-base');
+                            if (badgesContainer) {
+                                badgesContainer.innerHTML = `
+                                    <span class="flex items-center gap-1">
+                                        <span class="text-xs text-gray-500 dark:text-gray-400">SPF:</span>
+                                        ${getStatusIcon(spf.status)}
+                                    </span>
+                                    <span class="flex items-center gap-1">
+                                        <span class="text-xs text-gray-500 dark:text-gray-400">DKIM:</span>
+                                        ${getStatusIcon(dkim.status)}
+                                    </span>
+                                    <span class="flex items-center gap-1">
+                                        <span class="text-xs text-gray-500 dark:text-gray-400">DMARC:</span>
+                                        ${getStatusIcon(dmarc.status)}
+                                    </span>
+                                `;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            showToast(`Failed to check DNS for ${domainName}`, 'error');
+        }
+    } catch (error) {
+        console.error('Failed:', error);
+        showToast('Failed to check DNS', 'error');
+    } finally {
+        dnsCheckInProgress = false;
+    }
+}
+
 
 function formatBytes(bytes) {
     if (bytes === 0 || bytes === '0') return '0 B';
@@ -4013,41 +4218,108 @@ function renderImportCard(title, data, color) {
     `;
 }
 
-function renderJobCard(title, data, description) {
-    if (!data) {
-        return `<div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded">
-            <p class="font-semibold text-gray-900 dark:text-white">${title}</p>
-            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">No data</p>
-        </div>`;
+function renderJobCard(name, job) {
+    if (!job) {
+        return '';
     }
     
-    const statusColors = {
-        running: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300',
-        scheduled: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
-        stopped: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
-    };
+    let statusBadge = '';
+    
+    switch(job.status) {
+        case 'running':
+            statusBadge = '<span class="px-2 py-1 text-xs font-medium rounded bg-blue-500 text-white">running</span>';
+            break;
+        case 'success':
+            statusBadge = '<span class="px-2 py-1 text-xs font-medium rounded bg-green-600 dark:bg-green-500 text-white">success</span>';
+            break;
+        case 'failed':
+            statusBadge = '<span class="px-2 py-1 text-xs font-medium rounded bg-red-600 dark:bg-red-500 text-white">failed</span>';
+            break;
+        case 'scheduled':
+            statusBadge = '<span class="px-2 py-1 text-xs font-medium rounded bg-purple-600 dark:bg-purple-500 text-white">scheduled</span>';
+            break;
+        default:
+            statusBadge = '<span class="px-2 py-1 text-xs font-medium rounded bg-gray-500 text-white">idle</span>';
+    }
     
     return `
         <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-            <div class="flex justify-between items-start mb-2">
-                <div>
-                    <p class="font-semibold text-gray-900 dark:text-white">${title}</p>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">${description}</p>
+            <div class="flex items-start justify-between gap-3 mb-2">
+                <div class="flex-1 min-w-0">
+                    <h4 class="font-semibold text-gray-900 dark:text-white text-sm">${name}</h4>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">${job.description || ''}</p>
                 </div>
-                <span class="px-2 py-1 text-xs font-medium rounded ${statusColors[data.status] || statusColors.running}">
-                    ${data.status || 'unknown'}
-                </span>
+                ${statusBadge}
             </div>
-            <div class="flex items-center gap-4 text-sm text-gray-600 dark:text-gray-400">
-                ${data.interval ? `<span>Interval: ${data.interval}</span>` : ''}
-                ${data.schedule ? `<span>Schedule: ${data.schedule}</span>` : ''}
-                ${data.retention ? `<span>Retention: ${data.retention}</span>` : ''}
-                ${data.expire_after ? `<span>Expire after: ${data.expire_after}</span>` : ''}
-                ${data.max_age ? `<span>Max age: ${data.max_age}</span>` : ''}
-                ${data.pending_items !== undefined ? `<span>Pending: ${data.pending_items}</span>` : ''}
+            
+            <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
+                ${job.interval ? `<span>⏱ ${job.interval}</span>` : ''}
+                ${job.schedule ? `<span>📅 ${job.schedule}</span>` : ''}
+                ${job.retention ? `<span>🗂 ${job.retention}</span>` : ''}
+                ${job.max_age ? `<span>⏳ Max: ${job.max_age}</span>` : ''}
+                ${job.expire_after ? `<span>⏱ Expire: ${job.expire_after}</span>` : ''}
+                ${job.pending_items !== undefined ? `<span class="font-medium text-yellow-600 dark:text-yellow-400">📋 Pending: ${job.pending_items}</span>` : ''}
             </div>
+            
+            ${job.last_run ? `
+                <div class="mt-2 pt-2 border-t border-gray-200 dark:border-gray-600">
+                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                        Last run: <span class="text-gray-900 dark:text-white font-medium">${formatTime(job.last_run)}</span>
+                    </p>
+                </div>
+            ` : ''}
+            
+            ${job.error ? `
+                <div class="mt-2 p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded">
+                    <p class="text-xs text-red-700 dark:text-red-300 font-mono break-all">${escapeHtml(job.error)}</p>
+                </div>
+            ` : ''}
         </div>
     `;
+}
+
+function showToast(message, type = 'info') {
+    // Remove existing toast if any
+    const existingToast = document.getElementById('toast-notification');
+    if (existingToast) {
+        existingToast.remove();
+    }
+    
+    const colors = {
+        'success': 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200 border-green-500',
+        'error': 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200 border-red-500',
+        'warning': 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-200 border-yellow-500',
+        'info': 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200 border-blue-500'
+    };
+    
+    const icons = {
+        'success': '✓',
+        'error': '✗',
+        'warning': '⚠',
+        'info': 'ℹ'
+    };
+    
+    const toast = document.createElement('div');
+    toast.id = 'toast-notification';
+    toast.className = `fixed bottom-4 right-4 z-50 ${colors[type]} border-l-4 p-4 rounded shadow-lg max-w-md animate-slide-in`;
+    toast.innerHTML = `
+        <div class="flex items-start gap-3">
+            <span class="text-xl font-bold flex-shrink-0">${icons[type]}</span>
+            <p class="text-sm flex-1">${message}</p>
+            <button onclick="this.parentElement.parentElement.remove()" class="text-lg font-bold hover:opacity-70 flex-shrink-0">×</button>
+        </div>
+    `;
+    
+    document.body.appendChild(toast);
+    
+    // Auto-remove after 4 seconds
+    setTimeout(() => {
+        if (toast.parentElement) {
+            toast.style.opacity = '0';
+            toast.style.transition = 'opacity 0.3s';
+            setTimeout(() => toast.remove(), 300);
+        }
+    }, 4000);
 }
 
 // =============================================================================

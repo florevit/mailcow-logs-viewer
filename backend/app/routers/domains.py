@@ -11,6 +11,13 @@ from datetime import datetime, timezone
 
 from app.mailcow_api import mailcow_api
 
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from app.database import get_db
+from app.models import DomainDNSCheck
+from fastapi import Depends
+from app.utils import format_datetime_for_api
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -432,7 +439,7 @@ async def check_domain_dns(domain: str) -> Dict[str, Any]:
             'spf': spf_result,
             'dkim': dkim_result,
             'dmarc': dmarc_result,
-            'checked_at': datetime.now(timezone.utc).isoformat()
+            'checked_at': format_datetime_for_api(datetime.now(timezone.utc))
         }
         
     except Exception as e:
@@ -440,59 +447,39 @@ async def check_domain_dns(domain: str) -> Dict[str, Any]:
         return {
             'domain': domain,
             'error': str(e),
-            'checked_at': datetime.now(timezone.utc).isoformat()
+            'checked_at': format_datetime_for_api(datetime.now(timezone.utc))
         }
 
 
 @router.get("/domains/all")
-async def get_all_domains_with_dns():
-    """
-    Get all domains from Mailcow with DNS validation checks
-    
-    Returns:
-        List of domains with detailed information and DNS checks
-    """
+async def get_all_domains_with_dns(db: Session = Depends(get_db)):
+    """Get all domains with cached DNS checks"""
     try:
-        # Fetch domains from Mailcow
         domains = await mailcow_api.get_domains()
+        
+        # Get last DNS check time FIRST
+        last_check = db.query(DomainDNSCheck).filter(
+        DomainDNSCheck.is_full_check == True
+        ).order_by(
+            DomainDNSCheck.checked_at.desc()
+        ).first()
         
         if not domains:
             return {
                 'domains': [],
                 'total': 0,
-                'active': 0
+                'active': 0,
+                'last_dns_check': format_datetime_for_api(last_check.checked_at) if (last_check and last_check.checked_at) else None
             }
         
-        # Process each domain and add DNS checks
-        domain_tasks = []
-        for domain_data in domains:
-            domain_name = domain_data.get('domain_name')
-            if domain_name:
-                domain_tasks.append(check_domain_dns(domain_name))
-        
-        # Run DNS checks in parallel
-        dns_results = await asyncio.gather(*domain_tasks, return_exceptions=True)
-        
-        # Combine domain data with DNS results
         result_domains = []
-        for i, domain_data in enumerate(domains):
+        for domain_data in domains:
             domain_name = domain_data.get('domain_name')
             if not domain_name:
                 continue
             
-            # Get DNS results (if available and not an exception)
-            dns_data = {}
-            if i < len(dns_results):
-                if isinstance(dns_results[i], Exception):
-                    logger.error(f"DNS check failed for {domain_name}: {dns_results[i]}")
-                    dns_data = {
-                        'error': str(dns_results[i]),
-                        'spf': {'status': 'error', 'message': 'Check failed'},
-                        'dkim': {'status': 'error', 'message': 'Check failed'},
-                        'dmarc': {'status': 'error', 'message': 'Check failed'}
-                    }
-                else:
-                    dns_data = dns_results[i]
+            # Get cached DNS check
+            dns_checks = get_cached_dns_check(db, domain_name)
             
             result_domains.append({
                 'domain_name': domain_name,
@@ -510,16 +497,17 @@ async def get_all_domains_with_dns():
                 'max_quota_for_domain': domain_data.get('max_quota_for_domain', 0),
                 'backupmx': domain_data.get('backupmx', 0) == 1,
                 'relay_all_recipients': domain_data.get('relay_all_recipients', 0) == 1,
-                'dns_checks': dns_data
+                'relay_unknown_only': domain_data.get('relay_unknown_only', 0) == 1,
+                'dns_checks': dns_checks or {}
             })
         
-        # Count active domains
         active_count = sum(1 for d in result_domains if d.get('active'))
         
         return {
             'domains': result_domains,
             'total': len(result_domains),
-            'active': active_count
+            'active': active_count,
+            'last_dns_check': format_datetime_for_api(last_check.checked_at) if (last_check and last_check.checked_at) else None
         }
         
     except Exception as e:
@@ -541,6 +529,126 @@ async def check_single_domain_dns(domain: str):
     try:
         dns_data = await check_domain_dns(domain)
         return dns_data
+    except Exception as e:
+        logger.error(f"Error checking DNS for {domain}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def save_dns_check_to_db(db: Session, domain_name: str, dns_data: Dict[str, Any], is_full_check: bool = False):
+    """Save DNS check results to database (upsert)"""
+    try:
+        checked_at = datetime.now(timezone.utc)
+        
+        existing = db.query(DomainDNSCheck).filter(
+            DomainDNSCheck.domain_name == domain_name
+        ).first()
+        
+        if existing:
+            existing.spf_check = dns_data.get('spf')
+            existing.dkim_check = dns_data.get('dkim')
+            existing.dmarc_check = dns_data.get('dmarc')
+            existing.checked_at = checked_at
+            existing.updated_at = checked_at
+            existing.is_full_check = is_full_check  # ← הוסף
+        else:
+            new_check = DomainDNSCheck(
+                domain_name=domain_name,
+                spf_check=dns_data.get('spf'),
+                dkim_check=dns_data.get('dkim'),
+                dmarc_check=dns_data.get('dmarc'),
+                checked_at=checked_at,
+                is_full_check=is_full_check  # ← הוסף
+            )
+            db.add(new_check)
+        
+        db.commit()
+        logger.info(f"Saved DNS check for {domain_name}")
+        
+    except Exception as e:
+        logger.error(f"Error saving DNS check for {domain_name}: {e}")
+        db.rollback()
+        raise
+
+
+def get_cached_dns_check(db: Session, domain_name: str) -> Dict[str, Any]:
+    """Get cached DNS check from database"""
+    try:
+        cached = db.query(DomainDNSCheck).filter(
+            DomainDNSCheck.domain_name == domain_name
+        ).first()
+        
+        if cached:
+            return {
+                'spf': cached.spf_check,
+                'dkim': cached.dkim_check,
+                'dmarc': cached.dmarc_check,
+                'checked_at': format_datetime_for_api(cached.checked_at) if cached.checked_at else None
+            }
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting cached DNS for {domain_name}: {e}")
+        return None
+
+
+@router.post("/domains/check-all-dns")
+async def check_all_domains_dns_manual(db: Session = Depends(get_db)):
+    """Manually trigger DNS check for all active domains"""
+    try:
+        domains = await mailcow_api.get_domains()
+        
+        if not domains:
+            return {
+                'status': 'success',
+                'message': 'No domains to check',
+                'domains_checked': 0,
+                'errors': []
+            }
+        
+        active_domains = [d for d in domains if d.get('active', 0) == 1]
+        
+        checked_count = 0
+        errors = []
+        
+        for domain_data in active_domains:
+            domain_name = domain_data.get('domain_name')
+            if not domain_name:
+                continue
+            
+            try:
+                dns_data = await check_domain_dns(domain_name)
+                await save_dns_check_to_db(db, domain_name, dns_data, is_full_check=True)
+                checked_count += 1
+            except Exception as e:
+                errors.append(f"{domain_name}: {str(e)}")
+        
+        status = 'success' if checked_count == len(active_domains) else 'partial'
+        
+        return {
+            'status': status,
+            'message': f'Checked {checked_count} domains',
+            'domains_checked': checked_count,
+            'errors': errors
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in manual DNS check: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/domains/{domain}/check-dns")
+async def check_single_domain_dns_manual(domain: str, db: Session = Depends(get_db)):
+    """Manually trigger DNS check for a single domain"""
+    try:
+        dns_data = await check_domain_dns(domain)
+        await save_dns_check_to_db(db, domain, dns_data, is_full_check=False)
+        
+        return {
+            'status': 'success',
+            'message': f'DNS checked for {domain}',
+            'data': dns_data
+        }
+        
     except Exception as e:
         logger.error(f"Error checking DNS for {domain}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

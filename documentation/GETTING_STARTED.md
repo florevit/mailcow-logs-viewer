@@ -48,8 +48,6 @@ nano .env
 | `MAILCOW_API_KEY` | Your Mailcow API key | `abc123-def456...` |
 | `POSTGRES_PASSWORD` | Database password<br>⚠️ Avoid special chars (`@:/?#`) - breaks connection strings<br>💡 Use UUID: Linux/Mac: `uuidgen` <br> or online https://it-tools.tech/uuid-generator  | Example: `a7f3c8e2-4b1d-4f9a-8c3e-7d2f1a9b5e4c` |
 
-**Note:** Active domains are automatically fetched from Mailcow API (`/api/v1/get/domain/all`) - no need to configure `MAILCOW_LOCAL_DOMAINS` anymore!
-
 **Review all other settings** and adjust as needed for your environment (timezone, fetch intervals, retention period, etc.)
 
 **🔐 Optional: Enable Authentication**

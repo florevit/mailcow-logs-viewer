@@ -9,6 +9,7 @@ from typing import Dict, Any
 
 from ..mailcow_api import mailcow_api
 from ..version import __version__
+from ..scheduler import check_app_version_update, get_app_version_cache
 
 logger = logging.getLogger(__name__)
 
@@ -22,58 +23,6 @@ version_cache = {
     "update_available": False,
     "changelog": None
 }
-
-# Cache for app version check (check once per day)
-app_version_cache = {
-    "checked_at": None,
-    "current_version": __version__,  # Read from VERSION file
-    "latest_version": None,
-    "update_available": False,
-    "changelog": None
-}
-
-async def check_app_version_update():
-    """
-    Check for app version updates from GitHub and update the cache.
-    This function can be called from both the API endpoint and the scheduler.
-    """
-    global app_version_cache
-    
-    logger.info("Checking app version and updates from GitHub...")
-    
-    # Check GitHub for latest version
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                "https://api.github.com/repos/ShlomiPorush/mailcow-logs-viewer/releases/latest"
-            )
-            
-            if response.status_code == 200:
-                release_data = response.json()
-                latest_version = release_data.get('tag_name', 'unknown')
-                # Remove 'v' prefix if present
-                if latest_version.startswith('v'):
-                    latest_version = latest_version[1:]
-                changelog = release_data.get('body', '')
-                
-                app_version_cache["latest_version"] = latest_version
-                app_version_cache["changelog"] = changelog
-                
-                # Compare versions (simple string comparison)
-                app_version_cache["update_available"] = app_version_cache["current_version"] != latest_version
-                
-                logger.info(f"App version check: Current={app_version_cache['current_version']}, Latest={latest_version}")
-            else:
-                logger.warning(f"GitHub API returned status {response.status_code}")
-                app_version_cache["latest_version"] = "unknown"
-                app_version_cache["update_available"] = False
-                
-    except Exception as e:
-        logger.error(f"Failed to check GitHub for app updates: {e}")
-        app_version_cache["latest_version"] = "unknown"
-        app_version_cache["update_available"] = False
-    
-    app_version_cache["checked_at"] = datetime.now(timezone.utc)
 
 @router.get("/status/containers")
 async def get_containers_status():
@@ -237,7 +186,8 @@ async def get_app_version_status(force: bool = Query(False, description="Force a
         force: If True, force a fresh check regardless of cache age
     """
     try:
-        global app_version_cache
+        # Get cache from scheduler
+        app_version_cache = get_app_version_cache()
         
         # Force check or check if cache is stale (more than 1 day old) and refresh if needed
         # This is a fallback in case the scheduler hasn't run yet
@@ -246,6 +196,7 @@ async def get_app_version_status(force: bool = Query(False, description="Force a
             app_version_cache["checked_at"] is None or 
             now - app_version_cache["checked_at"] > timedelta(days=1)):
             await check_app_version_update()
+            app_version_cache = get_app_version_cache()  # Get updated cache
         
         # Format last_checked with UTC timezone indicator ('Z' suffix)
         last_checked = None
@@ -269,13 +220,13 @@ async def get_app_version_status(force: bool = Query(False, description="Force a
     except Exception as e:
         logger.error(f"Error fetching app version status: {e}")
         return {
-            "current_version": app_version_cache["current_version"],
+            "current_version": __version__,
             "latest_version": "unknown",
             "update_available": False,
             "changelog": None,
-            "last_checked": None
+            "last_checked": None,
+            "error": str(e)
         }
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/status/mailcow-info")

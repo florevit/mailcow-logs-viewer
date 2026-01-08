@@ -5,6 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.8] - 2026-01-08
+
+### Added
+
+#### Automated Domains DNS Validation
+- **Automated Background Checks**:
+  - DNS checks run automatically every 6 hours via scheduler
+  - Checks only active domains to optimize performance
+  - Results cached with timestamps for quick display
+
+- **Manual DNS Verification**:
+  - **Global Check**: "Check Now" button in Domains Overview header
+    - Updates all active domains simultaneously
+    - Updates global "Last checked" timestamp
+  - **Single Domain Check**: Individual "Check" button per domain
+    - Updates only the specific domain without page refresh
+    - Partial UI update for better UX
+  - Toast notifications for user feedback on all check operations
+
+- **DNS Check Results Display**:
+  - Last check timestamp displayed in page header (global checks only)
+  - Last check timestamp per domain in DNS Security Records section
+
+#### Backend Infrastructure
+- **New Database Table**: `domain_dns_checks`
+  - Stores SPF, DKIM, DMARC validation results as JSONB
+  - Includes `checked_at` timestamp and `is_full_check` flag
+  - Automatic migration with PostgreSQL artifact cleanup
+  
+- **New API Endpoints**:
+  - `GET /api/domains/all` - Fetch all domains with cached DNS results
+  - `POST /api/domains/check-all-dns` - Trigger global DNS check (manual)
+  - `POST /api/domains/{domain}/check-dns` - Check specific domain DNS
+
+#### Frontend Enhancements
+- **Responsive Design**: Mobile-optimized layout
+  - Header elements stack vertically on mobile, horizontal on desktop
+  - Centered content on mobile for better readability
+  - Check button and timestamp properly aligned on all screen sizes
+
+- **Toast Notifications**: User feedback system
+  - Success, error, warning, and info message types
+  - Color-coded with icons (✓, ✗, ⚠, ℹ)
+  - Auto-dismiss after 4 seconds
+  - Manual dismiss option
+
+#### Background Jobs Monitoring & Enhanced UI
+- **Real-time Status Tracking**: All background jobs now report execution status (running/success/failed/idle/scheduled), last run timestamp, and error messages
+- **Enhanced Visual Design**: 
+  - Compact mobile-optimized layout
+  - Full-color status badges (solid green/blue/red/gray/purple backgrounds with white text)
+  - Icon indicators: ⏱ interval, 📅 schedule, 🗂 retention, ⏳ max age, 📋 pending items
+  - Always-visible last run timestamps
+- **Complete Job Coverage**: All 7 background jobs now visible in UI (previously only 5 were displayed):
+  - Fetch Logs, Complete Correlations, Update Final Status, Expire Correlations, Cleanup Logs, Check App Version, DNS Check
+
+### Changed
+
+#### Queue and Quarantine Page
+- **Display Order**: Quarantine page now displays newest messages first
+  - Messages sorted by creation timestamp in descending order (newest → oldest)
+  - Backend sorting ensures consistent ordering
+
+#### Dashboard - Recent Activity
+- **Layout Improvement**: Reorganized Status & Direction display for better readability
+  - Status and Direction badges now displayed on first line, right-aligned
+  - Timestamp moved to second line below badges
+
+### Background Jobs and Status Page
+- Background job status badges now use consistent full-color styling across all themes
+- Check App Version and DNS Check jobs now properly displayed in Status page
+- Simplified function signatures by removing redundant description parameters
+
+---
+
 ## [1.4.7] - 2026-01-06
 
 ### Added

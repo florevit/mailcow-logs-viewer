@@ -190,3 +190,20 @@ class MessageCorrelation(Base):
     
     def __repr__(self):
         return f"<MessageCorrelation(message_id={self.message_id}, status={self.final_status})>"
+
+
+class DomainDNSCheck(Base):
+    """Cached DNS check results for domains"""
+    __tablename__ = "domain_dns_checks"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    domain_name = Column(String(255), unique=True, index=True, nullable=False)
+    
+    spf_check = Column(JSONB)
+    dkim_check = Column(JSONB)
+    dmarc_check = Column(JSONB)
+    
+    checked_at = Column(DateTime, nullable=False)
+    is_full_check = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

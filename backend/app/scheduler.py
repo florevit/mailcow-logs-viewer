@@ -5,6 +5,7 @@ import logging
 import asyncio
 import hashlib
 import re
+import httpx
 from datetime import datetime, timedelta, timezone
 from typing import Set, Optional, List, Dict, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,9 +19,104 @@ from .database import get_db_context
 from .mailcow_api import mailcow_api
 from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from .correlation import detect_direction, parse_postfix_message
-from .routers.status import check_app_version_update
+from .models import DomainDNSCheck
+from .routers.domains import check_domain_dns, save_dns_check_to_db
 
 logger = logging.getLogger(__name__)
+
+# Job execution tracking
+job_status = {
+    'fetch_logs': {'last_run': None, 'status': 'idle', 'error': None},
+    'complete_correlations': {'last_run': None, 'status': 'idle', 'error': None},
+    'update_final_status': {'last_run': None, 'status': 'idle', 'error': None},
+    'expire_correlations': {'last_run': None, 'status': 'idle', 'error': None},
+    'cleanup_logs': {'last_run': None, 'status': 'idle', 'error': None},
+    'check_app_version': {'last_run': None, 'status': 'idle', 'error': None},
+    'dns_check': {'last_run': None, 'status': 'idle', 'error': None}
+}
+
+def update_job_status(job_name: str, status: str, error: str = None):
+    """Update job execution status"""
+    job_status[job_name] = {
+        'last_run': datetime.now(timezone.utc),
+        'status': status,
+        'error': error
+    }
+
+def get_job_status():
+    """Get all job statuses"""
+    return job_status
+
+# App version cache (shared with status router)
+app_version_cache = {
+    "checked_at": None,
+    "current_version": None,  # Will be set on first check
+    "latest_version": None,
+    "update_available": False,
+    "changelog": None
+}
+
+async def check_app_version_update():
+    """
+    Check for app version updates from GitHub and update the cache.
+    This function is called by the scheduler and can also be called from the API endpoint.
+    """
+    update_job_status('check_app_version', 'running')
+    
+    global app_version_cache
+    
+    # Get current version from VERSION file
+    try:
+        from .version import __version__
+        current_version = __version__
+        app_version_cache["current_version"] = current_version
+    except Exception as e:
+        logger.error(f"Failed to read current version: {e}")
+        update_job_status('check_app_version', 'failed', str(e))
+        return
+    
+    logger.info("Checking app version and updates from GitHub...")
+    
+    # Check GitHub for latest version
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.github.com/repos/ShlomiPorush/mailcow-logs-viewer/releases/latest"
+            )
+            
+            if response.status_code == 200:
+                release_data = response.json()
+                latest_version = release_data.get('tag_name', 'unknown')
+                # Remove 'v' prefix if present
+                if latest_version.startswith('v'):
+                    latest_version = latest_version[1:]
+                changelog = release_data.get('body', '')
+                
+                app_version_cache["latest_version"] = latest_version
+                app_version_cache["changelog"] = changelog
+                
+                # Compare versions (simple string comparison)
+                app_version_cache["update_available"] = current_version != latest_version
+                
+                logger.info(f"App version check: Current={current_version}, Latest={latest_version}")
+                update_job_status('check_app_version', 'success')
+            else:
+                logger.warning(f"GitHub API returned status {response.status_code}")
+                app_version_cache["latest_version"] = "unknown"
+                app_version_cache["update_available"] = False
+                update_job_status('check_app_version', 'failed', f"GitHub API returned {response.status_code}")
+                
+    except Exception as e:
+        logger.error(f"Failed to check GitHub for app updates: {e}")
+        app_version_cache["latest_version"] = "unknown"
+        app_version_cache["update_available"] = False
+        update_job_status('check_app_version', 'failed', str(e))
+    
+    app_version_cache["checked_at"] = datetime.now(timezone.utc)
+
+def get_app_version_cache():
+    """Get app version cache (for API endpoint)"""
+    return app_version_cache
 
 scheduler = AsyncIOScheduler()
 
@@ -33,7 +129,6 @@ last_fetch_run_time: Dict[str, Optional[datetime]] = {
     'rspamd': None,
     'netfilter': None
 }
-
 
 def is_blacklisted(email: Optional[str]) -> bool:
     """
@@ -438,7 +533,9 @@ async def fetch_and_store_netfilter():
 async def fetch_all_logs():
     """Fetch all log types concurrently"""
     try:
+        update_job_status('fetch_logs', 'running')
         logger.debug("[FETCH] Starting fetch_all_logs")
+        
         results = await asyncio.gather(
             fetch_and_store_postfix(),
             fetch_and_store_rspamd(),
@@ -452,7 +549,10 @@ async def fetch_all_logs():
                 logger.error(f"[ERROR] {log_type} fetch failed: {result}", exc_info=result)
         
         logger.debug("[FETCH] Completed fetch_all_logs")
+        update_job_status('fetch_logs', 'success')
+        
     except Exception as e:
+        update_job_status('fetch_logs', 'failed', str(e))
         logger.error(f"[ERROR] Fetch all logs error: {e}", exc_info=True)
 
 
@@ -748,6 +848,7 @@ async def complete_incomplete_correlations():
     
     This handles the case where rspamd was processed before postfix logs arrived.
     """
+    update_job_status('complete_correlations', 'running')
     try:
         with get_db_context() as db:
             # Find incomplete correlations (have message_id but missing queue_id or postfix logs)
@@ -823,9 +924,11 @@ async def complete_incomplete_correlations():
             
             if completed_count > 0:
                 logger.info(f"[OK] Completed {completed_count} correlations")
+                update_job_status('complete_correlations', 'success')
     
     except Exception as e:
         logger.error(f"[ERROR] Complete correlations error: {e}")
+        update_job_status('complete_correlations', 'failed', str(e))
 
 
 async def expire_old_correlations():
@@ -841,6 +944,7 @@ async def expire_old_correlations():
     
     Uses datetime.utcnow() (naive) to match the naive datetime in created_at.
     """
+    update_job_status('expire_correlations', 'running')
     try:
         with get_db_context() as db:
             # Use naive datetime for comparison (DB stores naive UTC)
@@ -867,9 +971,11 @@ async def expire_old_correlations():
             
             if expired_count > 0:
                 logger.info(f"[EXPIRED] Marked {expired_count} correlations as expired (older than {settings.max_correlation_age_minutes}min)")
+                update_job_status('expire_correlations', 'success')
     
     except Exception as e:
         logger.error(f"[ERROR] Expire correlations error: {e}")
+        update_job_status('expire_correlations', 'failed', str(e))
 
 
 async def update_final_status_for_correlations():
@@ -886,6 +992,7 @@ async def update_final_status_for_correlations():
     This runs independently from correlation creation to ensure we catch
     late-arriving Postfix logs.
     """
+    update_job_status('update_final_status', 'running')
     try:
         with get_db_context() as db:
             # Only check correlations within Max Correlation Age
@@ -956,9 +1063,11 @@ async def update_final_status_for_correlations():
             
             if updated_count > 0:
                 logger.info(f"[STATUS] Updated final_status for {updated_count} correlations")
+                update_job_status('update_final_status', 'success')
     
     except Exception as e:
         logger.error(f"[ERROR] Update final status error: {e}")
+        update_job_status('update_final_status', 'failed', str(e))
 
 
 # =============================================================================
@@ -967,6 +1076,7 @@ async def update_final_status_for_correlations():
 
 async def cleanup_old_logs():
     """Delete logs older than retention period"""
+    update_job_status('cleanup_logs', 'running')
     try:
         with get_db_context() as db:
             cutoff_date = datetime.now(timezone.utc) - timedelta(
@@ -995,9 +1105,11 @@ async def cleanup_old_logs():
             
             if total > 0:
                 logger.info(f"[CLEANUP] Cleaned up {total} old entries")
+                update_job_status('cleanup_logs', 'success')
     
     except Exception as e:
         logger.error(f"[ERROR] Cleanup error: {e}")
+        update_job_status('cleanup_logs', 'failed', str(e))
 
 
 def cleanup_blacklisted_data():
@@ -1094,6 +1206,43 @@ def cleanup_blacklisted_data():
         logger.error(f"[BLACKLIST] Cleanup error: {e}")
 
 
+async def check_all_domains_dns_background():
+    """Background job to check DNS for all domains"""
+    logger.info("Starting background DNS check...")
+    update_job_status('dns_check', 'running')
+    try:
+        domains = await mailcow_api.get_domains()
+        
+        if not domains:
+            return
+        
+        checked_count = 0
+        
+        for domain_data in domains:
+            domain_name = domain_data.get('domain_name')
+            if not domain_name or domain_data.get('active', 0) != 1:
+                continue
+            
+            try:
+                dns_data = await check_domain_dns(domain_name)
+                
+                with get_db_context() as db:
+                    await save_dns_check_to_db(db, domain_name, dns_data, is_full_check=True)
+                
+                checked_count += 1
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Failed DNS check for {domain_name}: {e}")
+        
+        logger.info(f"DNS check completed: {checked_count} domains")
+        update_job_status('dns_check', 'success')
+        
+    except Exception as e:
+        logger.error(f"Background DNS check failed: {e}")
+        update_job_status('dns_check', 'failed', str(e))
+
+
 # =============================================================================
 # SCHEDULER SETUP
 # =============================================================================
@@ -1177,6 +1326,24 @@ def start_scheduler():
             next_run_time=datetime.now(timezone.utc)  # Run immediately on startup
         )
         
+        # Job 8: DNS Check
+        scheduler.add_job(
+            check_all_domains_dns_background,
+            trigger=IntervalTrigger(hours=6),
+            id='dns_check_background',
+            name='DNS Check (All Domains)',
+            replace_existing=True,
+            max_instances=1
+        )
+        
+        scheduler.add_job(
+            check_all_domains_dns_background,
+            'date',
+            run_date=datetime.now(timezone.utc) + timedelta(seconds=30),
+            id='dns_check_startup',
+            name='DNS Check (Startup)'
+        )
+
         scheduler.start()
         
         logger.info("[OK] Scheduler started")
@@ -1186,6 +1353,7 @@ def start_scheduler():
         logger.info(f"   [STATUS] Update final status: every {settings.correlation_check_interval}s (max age: {settings.max_correlation_age_minutes}min)")
         logger.info(f"   [EXPIRE] Old correlations: every 60s (expire after {settings.max_correlation_age_minutes}min)")
         logger.info(f"   [VERSION] Check app version updates: every 6 hours")
+        logger.info(f"   [DNS] Check all domains DNS: every 6 hours")
         
         # Log blacklist status
         blacklist = settings.blacklist_emails_list

@@ -6,9 +6,13 @@ A modern, self-hosted dashboard for viewing and analyzing Mailcow mail server lo
 
 ![Messages](images/Messages.png)
 
-![Message Details](images/Message%20Details.png)
+![Message Details](images/Message_Details_Overview.png)
+
+![Message Logs](images/Message_Details_Logs.png)
 
 ![Security](images/Security.png)
+
+![Domains](images/Domains.png)
 
 ![Status](images/Status.png)
 
@@ -115,8 +119,6 @@ All settings via environment variables. See **[env.example](env.example)** for f
 | `MAILCOW_URL` | Mailcow instance URL |
 | `MAILCOW_API_KEY` | Mailcow API key |
 | `POSTGRES_PASSWORD` | Database password |
-
-**Note:** Active domains are automatically fetched from Mailcow API - no configuration needed!
 
 ### Key Optional Settings
 

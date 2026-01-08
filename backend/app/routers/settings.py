@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 from ..database import get_db
 from ..models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from ..config import settings
-from ..scheduler import last_fetch_run_time
+from ..scheduler import last_fetch_run_time, get_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,8 @@ async def get_settings_info(db: Session = Depends(get_db)):
             MessageCorrelation.is_complete == False
         ).order_by(desc(MessageCorrelation.created_at)).limit(5).all()
         
+        jobs_status = get_job_status()
+
         return {
             "configuration": {
                 "mailcow_url": settings.mailcow_url,
@@ -142,28 +144,57 @@ async def get_settings_info(db: Session = Depends(get_db)):
             "background_jobs": {
                 "fetch_logs": {
                     "interval": f"{settings.fetch_interval} seconds",
-                    "status": "running"
+                    "description": "Imports logs from Mailcow API",
+                    "status": jobs_status.get('fetch_logs', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('fetch_logs', {}).get('last_run')),
+                    "error": jobs_status.get('fetch_logs', {}).get('error')
                 },
                 "complete_correlations": {
                     "interval": f"{settings.correlation_check_interval} seconds ({settings.correlation_check_interval // 60} minutes)",
-                    "status": "running",
+                    "description": "Links Postfix logs to messages",
+                    "status": jobs_status.get('complete_correlations', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('complete_correlations', {}).get('last_run')),
+                    "error": jobs_status.get('complete_correlations', {}).get('error'),
                     "pending_items": incomplete_correlations or 0
                 },
                 "update_final_status": {
                     "interval": f"{settings.correlation_check_interval} seconds ({settings.correlation_check_interval // 60} minutes)",
+                    "description": "Updates final status for correlations with late-arriving Postfix logs",
                     "max_age": f"{settings.max_correlation_age_minutes} minutes",
-                    "status": "running",
+                    "status": jobs_status.get('update_final_status', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('update_final_status', {}).get('last_run')),
+                    "error": jobs_status.get('update_final_status', {}).get('error'),
                     "pending_items": correlations_needing_status or 0
                 },
                 "expire_correlations": {
                     "interval": "60 seconds (1 minute)",
+                    "description": "Marks old incomplete correlations as expired",
                     "expire_after": f"{settings.max_correlation_age_minutes} minutes",
-                    "status": "running"
+                    "status": jobs_status.get('expire_correlations', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('expire_correlations', {}).get('last_run')),
+                    "error": jobs_status.get('expire_correlations', {}).get('error')
                 },
                 "cleanup_logs": {
                     "schedule": "Daily at 2 AM",
+                    "description": "Removes old logs based on retention period",
                     "retention": f"{settings.retention_days} days",
-                    "status": "scheduled"
+                    "status": jobs_status.get('cleanup_logs', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('cleanup_logs', {}).get('last_run')),
+                    "error": jobs_status.get('cleanup_logs', {}).get('error')
+                },
+                "check_app_version": {
+                    "interval": "6 hours",
+                    "description": "Checks for application updates from GitHub",
+                    "status": jobs_status.get('check_app_version', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('check_app_version', {}).get('last_run')),
+                    "error": jobs_status.get('check_app_version', {}).get('error')
+                },
+                "dns_check": {
+                    "interval": "6 hours",
+                    "description": "Validates DNS records (SPF, DKIM, DMARC) for all active domains",
+                    "status": jobs_status.get('dns_check', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('dns_check', {}).get('last_run')),
+                    "error": jobs_status.get('dns_check', {}).get('error')
                 }
             },
             "recent_incomplete_correlations": [

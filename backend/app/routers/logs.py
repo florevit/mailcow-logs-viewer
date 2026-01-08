@@ -430,25 +430,33 @@ async def get_netfilter_logs(
 async def get_queue():
     """
     Get current mail queue from Mailcow (real-time)
+    Returns messages sorted by newest first (by arrival_time)
     """
     try:
         queue = await mailcow_api.get_queue()
+        
+        # Sort by arrival_time - newest first (descending order)
+        # arrival_time is a Unix timestamp (integer)
+        queue_sorted = sorted(
+            queue,
+            key=lambda x: x.get('arrival_time', 0),
+            reverse=True  # Newest first
+        )
+        
         return {
-            "total": len(queue),
-            "data": queue
+            "total": len(queue_sorted),
+            "data": queue_sorted
         }
     except Exception as e:
         logger.error(f"Error fetching queue: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-from datetime import datetime, timezone
-
-
 @router.get("/quarantine")
 async def get_quarantine():
     """
     Get quarantined messages from Mailcow (real-time)
+    Returns messages sorted by newest first
     """
     try:
         quarantine = await mailcow_api.get_quarantine()
@@ -461,6 +469,8 @@ async def get_quarantine():
                     # Convert Unix timestamp to ISO format with 'Z' suffix
                     dt = datetime.fromtimestamp(item['created'], tz=timezone.utc)
                     item['created'] = dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+                    # Store the numeric value for sorting
+                    item['_created_timestamp'] = item['created']
                 elif isinstance(item['created'], str):
                     # Parse ISO string and ensure it has 'Z' suffix for UTC
                     try:
@@ -470,12 +480,26 @@ async def get_quarantine():
                         else:
                             dt = dt.astimezone(timezone.utc)
                         item['created'] = dt.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+                        # Store the datetime object for sorting
+                        item['_created_timestamp'] = dt.timestamp()
                     except (ValueError, AttributeError):
                         pass
         
+        # Sort by created timestamp - newest first (descending order)
+        # Items without valid timestamp will be at the end
+        quarantine_sorted = sorted(
+            quarantine,
+            key=lambda x: x.get('_created_timestamp', 0),
+            reverse=True  # Newest first
+        )
+        
+        # Remove the temporary sorting field before returning
+        for item in quarantine_sorted:
+            item.pop('_created_timestamp', None)
+        
         return {
-            "total": len(quarantine),
-            "data": quarantine
+            "total": len(quarantine_sorted),
+            "data": quarantine_sorted
         }
     except Exception as e:
         logger.error(f"Error fetching quarantine: {e}")
