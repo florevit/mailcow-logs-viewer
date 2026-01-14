@@ -373,13 +373,10 @@ def add_is_full_check_column(db: Session):
 def add_postfix_unique_constraint(db: Session):
     """
     Add UNIQUE constraint to postfix_logs to prevent duplicate logs
-    
-    Uses a safer approach with batched deletes and proper error handling
     """
     logger.info("Adding UNIQUE constraint to postfix_logs...")
     
     try:
-        # Check if constraint already exists
         result = db.execute(text("""
             SELECT constraint_name 
             FROM information_schema.table_constraints 
@@ -391,51 +388,33 @@ def add_postfix_unique_constraint(db: Session):
             logger.info("UNIQUE constraint already exists, skipping...")
             return
         
-        # Step 1: Delete duplicates in small batches to avoid deadlock
-        logger.info("Cleaning up duplicate Postfix logs in batches...")
+        logger.info("Cleaning up duplicate Postfix logs...")
         
-        batch_size = 1000
-        total_deleted = 0
+        # Delete ALL duplicates in ONE query - much faster
+        result = db.execute(text("""
+            DELETE FROM postfix_logs
+            WHERE id IN (
+                SELECT id
+                FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY time, program, COALESCE(queue_id, ''), message
+                               ORDER BY created_at ASC
+                           ) as row_num
+                    FROM postfix_logs
+                ) t
+                WHERE t.row_num > 1
+            )
+        """))
         
-        while True:
-            try:
-                result = db.execute(text(f"""
-                    DELETE FROM postfix_logs
-                    WHERE id IN (
-                        SELECT id
-                        FROM (
-                            SELECT id,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY time, program, COALESCE(queue_id, ''), message
-                                       ORDER BY created_at ASC
-                                   ) as row_num
-                            FROM postfix_logs
-                        ) t
-                        WHERE t.row_num > 1
-                        LIMIT {batch_size}
-                    )
-                """))
-                
-                deleted = result.rowcount
-                total_deleted += deleted
-                db.commit()
-                
-                if deleted == 0:
-                    break  # No more duplicates
-                    
-                logger.info(f"Deleted {deleted} duplicates (total: {total_deleted})...")
-                
-            except Exception as e:
-                logger.warning(f"Error deleting batch: {e}")
-                db.rollback()
-                break  # Skip if there's a lock issue
+        deleted = result.rowcount
+        db.commit()
         
-        if total_deleted > 0:
-            logger.info(f"Deleted {total_deleted} duplicate Postfix logs")
+        if deleted > 0:
+            logger.info(f"Deleted {deleted} duplicate Postfix logs")
         else:
             logger.info("No duplicate Postfix logs found")
         
-        # Step 2: Add UNIQUE constraint
         logger.info("Creating UNIQUE constraint...")
         db.execute(text("""
             ALTER TABLE postfix_logs
@@ -457,7 +436,6 @@ def add_postfix_unique_constraint(db: Session):
         else:
             logger.error(f"Error adding UNIQUE constraint: {e}")
             db.rollback()
-            # Don't raise - allow app to start
 
 def ensure_dmarc_tables(db: Session):
     """Ensure DMARC tables exist with proper structure"""
