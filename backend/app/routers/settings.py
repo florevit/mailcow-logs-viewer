@@ -3,6 +3,7 @@ API endpoints for settings and system information
 Shows configuration, last import times, and background job status
 """
 import logging
+import httpx
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, text, or_
@@ -13,6 +14,9 @@ from ..database import get_db
 from ..models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from ..config import settings
 from ..scheduler import last_fetch_run_time, get_job_status
+from ..services.connection_test import test_smtp_connection, test_imap_connection
+from ..services.geoip_downloader import is_license_configured, get_geoip_status
+from .domains import get_cached_server_ip
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +98,7 @@ async def get_settings_info(db: Session = Depends(get_db)):
         return {
             "configuration": {
                 "mailcow_url": settings.mailcow_url,
+                "server_ip": get_cached_server_ip(),
                 "local_domains": settings.local_domains_list,
                 "fetch_interval": settings.fetch_interval,
                 "fetch_count_postfix": settings.fetch_count_postfix,
@@ -111,7 +116,8 @@ async def get_settings_info(db: Session = Depends(get_db)):
                 "csv_export_limit": settings.csv_export_limit,
                 "scheduler_workers": settings.scheduler_workers,
                 "auth_enabled": settings.auth_enabled,
-                "auth_username": settings.auth_username if settings.auth_enabled else None
+                "auth_username": settings.auth_username if settings.auth_enabled else None,
+                "maxmind_status": await validate_maxmind_license()
             },
             "import_status": {
                 "postfix": {
@@ -195,6 +201,56 @@ async def get_settings_info(db: Session = Depends(get_db)):
                     "status": jobs_status.get('dns_check', {}).get('status', 'unknown'),
                     "last_run": format_datetime_utc(jobs_status.get('dns_check', {}).get('last_run')),
                     "error": jobs_status.get('dns_check', {}).get('error')
+                },
+                "sync_local_domains": {
+                    "interval": "6 hours",
+                    "description": "Syncs active domains list from Mailcow API",
+                    "status": jobs_status.get('sync_local_domains', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('sync_local_domains', {}).get('last_run')),
+                    "error": jobs_status.get('sync_local_domains', {}).get('error')
+                },
+                "dmarc_imap_sync": {
+                    "interval": f"{settings.dmarc_imap_interval} seconds ({settings.dmarc_imap_interval // 60} minutes)" if settings.dmarc_imap_enabled else "Disabled",
+                    "description": "Imports DMARC reports from IMAP mailbox",
+                    "enabled": settings.dmarc_imap_enabled,
+                    "status": jobs_status.get('dmarc_imap_sync', {}).get('status', 'idle') if settings.dmarc_imap_enabled else 'disabled',
+                    "last_run": format_datetime_utc(jobs_status.get('dmarc_imap_sync', {}).get('last_run')) if settings.dmarc_imap_enabled else None,
+                    "error": jobs_status.get('dmarc_imap_sync', {}).get('error') if settings.dmarc_imap_enabled else None
+                },
+                "update_geoip": {
+                    "schedule": "Weekly (Sunday 3 AM)" if is_license_configured() else "Disabled",
+                    "description": "Updates MaxMind GeoIP databases (City & ASN)",
+                    "enabled": is_license_configured(),
+                    "status": jobs_status.get('update_geoip', {}).get('status', 'idle') if is_license_configured() else 'disabled',
+                    "last_run": format_datetime_utc(jobs_status.get('update_geoip', {}).get('last_run')) if is_license_configured() else None,
+                    "error": jobs_status.get('update_geoip', {}).get('error') if is_license_configured() else None
+                }
+            },
+            "smtp_configuration": {
+                "enabled": settings.smtp_enabled,
+                "host": settings.smtp_host if settings.smtp_enabled else None,
+                "port": settings.smtp_port if settings.smtp_enabled else None,
+                "user": settings.smtp_user if settings.smtp_enabled else None,
+                "from_address": settings.smtp_from if settings.smtp_enabled else None,
+                "use_tls": settings.smtp_use_tls if settings.smtp_enabled else None,
+                "admin_email": settings.admin_email if settings.smtp_enabled else None,
+                "configured": settings.notification_smtp_configured
+            },
+            "dmarc_configuration": {
+                "manual_upload_enabled": settings.dmarc_manual_upload_enabled,
+                "imap_sync_enabled": settings.dmarc_imap_enabled,
+                "imap_host": settings.dmarc_imap_host if settings.dmarc_imap_enabled else None,
+                "imap_user": settings.dmarc_imap_user if settings.dmarc_imap_enabled else None,
+                "imap_folder": settings.dmarc_imap_folder if settings.dmarc_imap_enabled else None,
+                "imap_delete_after": settings.dmarc_imap_delete_after if settings.dmarc_imap_enabled else None,
+                "imap_interval_minutes": round(settings.dmarc_imap_interval / 60, 1) if settings.dmarc_imap_enabled else None,
+                "smtp_configured": settings.notification_smtp_configured
+            },
+            "geoip_configuration": {
+                "enabled": is_license_configured(),
+                "databases": get_geoip_status() if is_license_configured() else {
+                    "City": {"installed": False, "version": None, "last_updated": None},
+                    "ASN": {"installed": False, "version": None, "last_updated": None}
                 }
             },
             "recent_incomplete_correlations": [
@@ -220,6 +276,17 @@ async def get_settings_info(db: Session = Depends(get_db)):
             "background_jobs": {}
         }
 
+@router.post("/settings/test/smtp")
+async def test_smtp():
+    """Test SMTP connection with detailed logging"""
+    result = test_smtp_connection()
+    return result
+
+@router.post("/settings/test/imap")
+async def test_imap():
+    """Test IMAP connection with detailed logging"""
+    result = test_imap_connection()
+    return result
 
 @router.get("/settings/health")
 async def get_health_detailed(db: Session = Depends(get_db)):
@@ -271,3 +338,29 @@ async def get_health_detailed(db: Session = Depends(get_db)):
             "timestamp": format_datetime_utc(datetime.now(timezone.utc)),
             "error": str(e)
         }
+
+async def validate_maxmind_license() -> Dict[str, Any]:
+    """Validate MaxMind license key"""
+    import os
+    
+    license_key = os.getenv('MAXMIND_LICENSE_KEY')
+    
+    if not license_key:
+        return {"configured": False, "valid": False, "error": None}
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                "https://secret-scanning.maxmind.com/secrets/validate-license-key",
+                data={"license_key": license_key},
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            
+            if response.status_code == 204:
+                return {"configured": True, "valid": True, "error": None}
+            elif response.status_code == 401:
+                return {"configured": True, "valid": False, "error": "Invalid"}
+            else:
+                return {"configured": True, "valid": False, "error": f"Status {response.status_code}"}
+    except Exception:
+        return {"configured": True, "valid": False, "error": "Connection error"}

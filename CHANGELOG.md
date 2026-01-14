@@ -5,6 +5,227 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-01-09
+
+### Added
+
+#### DMARC Backend
+- Daily data aggregation for performance
+- GeoIP enrichment with MaxMind database support (City + ASN)
+- Automatic MaxMind database downloads and updates
+- Weekly scheduler for MaxMind databases updates (Sunday 3 AM)
+
+#### DMARC Frontend - Complete UI Implementation
+- **Domains List View**: 
+  - Stats dashboard showing total domains, messages, pass rate, and unique IPs
+  - Full domain overview with 30-day statistics
+  - Color-coded pass rates (green ≥95%, yellow ≥80%, red <80%)
+  - Policy badges (reject/quarantine/none) with appropriate styling
+  - Empty state with helpful messaging for first-time users
+  
+- **Domain Overview Page**:
+  - Breadcrumb navigation in DMARC page
+  - Domain-specific stats cards (total messages, compliance rate, unique sources)
+  - Daily Volume Graph showing 30-day email trends
+
+- **Daily Reports Tab**:
+  - Aggregated daily report cards
+  - Shows report count, unique IPs, total messages per day
+  - SPF and DKIM pass percentages displayed
+  - Overall DMARC pass rate
+  - Chronological ordering (newest first)
+  
+- **Source IPs Tab with Complete GeoIP Info**:
+  - City names from MaxMind City database
+  - ISP/Organization names
+  - Country flag emoji display
+  - Message counts and pass rates per IP
+  
+- **Upload DMARC Functionality**:
+  - Upload button
+  - Supports XML, GZ, and ZIP file formats
+  - Toast notifications for success/duplicate/error states
+  - Auto-refresh of current view after successful upload
+  - Client-side file validation
+
+#### DMARC IMAP Auto-Import System
+- **Automatic Report Fetching**: Complete IMAP integration for automatic DMARC report imports
+  - Configurable sync interval (default: 1 hour) via `DMARC_IMAP_INTERVAL`
+  - Automatic connection to IMAP mailbox and report processing
+  - Supports SSL/TLS connections (`DMARC_IMAP_USE_SSL`)
+  - Configurable folder monitoring (default: INBOX via `DMARC_IMAP_FOLDER`)
+  - Optional email deletion after processing (`DMARC_IMAP_DELETE_AFTER`)
+  - Background job runs automatically at specified intervals
+  - Manual sync trigger available in DMARC page
+  
+- **DMARC IMAP Sync History**:
+  - Comprehensive sync statistics tracking (emails found, processed, created, duplicates, failed)
+  - Interactive modal showing all past sync operations
+  - Color-coded status indicators (success/error)
+  - Duration display for each sync
+  - Failed email count with highlighting
+  - "View History" button in DMARC tab
+  - Sync history persists across restarts
+
+- **DMARC Error Notifications**: Automatic email alerts for IMAP sync failures
+  - Sends detailed error reports when IMAP sync encounters failures
+  - Email includes: failed email count, message IDs, subjects, and error descriptions
+  - Link to sync history in notification email
+  - Only sends when failures occur and SMTP is configured
+  - Configurable error recipient via `DMARC_ERROR_EMAIL` (defaults to `ADMIN_EMAIL`)
+
+#### Global SMTP Configuration & Notifications
+- **Centralized SMTP Service**: Generic email infrastructure for all notification types
+  - Configured via environment variables: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`
+  - Support for TLS/SSL connections (`SMTP_USE_TLS`)
+  - Configurable sender address (`SMTP_FROM`) and admin email (`ADMIN_EMAIL`)
+  - Can be enabled/disabled globally (`SMTP_ENABLED`)
+  - Ready for future notification types beyond DMARC
+
+- **Settings UI Enhancements**:
+  - New "Global SMTP Configuration" section showing current SMTP settings
+  - New "DMARC Management" section showing manual upload and IMAP status
+  - Display of SMTP server, port, and admin email when configured
+  - Display of IMAP server when auto-import enabled
+
+- **Test Connection Buttons**: 
+  - Added diagnostic test buttons in Settings page for both SMTP and IMAP
+  - Interactive popup showing connection attempt logs in real-time
+  - Tests authentication, server connectivity, mailbox access, and email sending
+
+#### DMARC Tab Enhancements
+- **IMAP Sync Controls**: Dynamic UI based on configuration
+  - "Sync from IMAP" button appears when IMAP auto-import enabled
+  - "Upload Report" button hidden when manual upload disabled (`DMARC_MANUAL_UPLOAD_ENABLED=false`)
+  - Last sync information displayed below sync button (time and status icon)
+
+#### MaxMind GeoIP Integration
+- **Configuration**:
+  - MaxMind account ID and license key via .env
+  - `MAXMIND_ACCOUNT_ID` - MaxMind account ID
+  - `MAXMIND_LICENSE_KEY` - MaxMind license key
+  - Free GeoLite2 databases available at maxmind.com
+  - Databases stored in `/app/data/` directory
+
+- **Automatic Database Management**:
+  - Auto-downloads MaxMind GeoLite2 databases on first startup
+  - Dual database support: GeoLite2-City + GeoLite2-ASN
+  - Weekly automatic updates (Sunday 3 AM via scheduler)
+  - Database persistence via Docker volume mount (`./data:/app/data`)
+  
+- **GeoIP Enrichment Service**:
+  - Enriches all DMARC source IPs automatically during upload
+  - Dual readers for City and ASN lookups
+  - City names, Country code, Country name, Country emoji flags
+  - ASN Number, ASN organization
+  
+- **Graceful Degradation**:
+  - Works without MaxMind license key (returns null for geo fields)
+  - Continues operation if databases unavailable
+  - Default globe emoji (🌍) for unknown locations
+  - Non-blocking errors (logs warnings but doesn't crash)
+  
+- **Background Job**:
+  - Runs weekly on Sunday at 3 AM
+  - Checks database age (updates if >7 days old)
+  - Downloads both City and ASN Databases
+  - Automatic retry with exponential backoff
+  - Status tracking in Status page
+
+- **MaxMind License Validation**: Added real-time validation of MaxMind license key in Settings page
+  - Validates license key using MaxMind's validation API
+  - Displays status badge: "Configured" (green with checkmark) or "Not configured" (gray)
+  - Shows error details if validation fails (red badge with X icon)
+
+#### SPF Validation Enhancements
+- **DNS Lookup Counter**: SPF validation now counts and validates DNS lookups according to RFC 7208
+  - Recursive counting through `include:` directives
+  - Counts `a`, `mx`, `exists:`, `redirect=`, and `include:` mechanisms
+  - Maximum limit of 10 DNS lookups enforced
+  - Returns error when limit exceeded: "SPF has too many DNS lookups (X). Maximum is 10"
+
+- **Server IP Authorization Check**: SPF validation now verifies mail server IP is authorized
+  - Fetches server IP from Mailcow API on startup
+  - Caches IP in memory for performance (no repeated API calls)
+  - Checks if server IP is authorized via:
+    - Direct `ip4:` match (including CIDR ranges)
+    - `a` record lookup
+    - `mx` record lookup
+    - Recursive `include:`
+  - Returns error if server IP not found in SPF: "Server IP X.X.X.X is NOT authorized in SPF record"
+  - Shows authorization method in success message: "Server IP authorized via ip4:X.X.X.X"
+
+- **Enhanced SPF Validation**: Complete SPF record validation
+  - Detects multiple SPF records (RFC violation - only one allowed)
+  - Validates basic syntax (`v=spf1` with space)
+  - Checks for valid mechanisms only (ip4, ip6, a, mx, include, exists, all)
+  - Validates presence of `all` mechanism
+  - Prevents infinite loops in circular includes
+  - Depth protection (maximum 10 recursion levels)
+
+#### DKIM Parameter Validation
+- **Testing Mode Detection** (`t=y`): Critical error detection
+  - Detects DKIM testing mode flag
+  - Returns error status with message: "DKIM is in TESTING mode (t=y)"
+  - Warning: "Emails will pass validation even with invalid signatures. Remove t=y for production!"
+  - Prevents false validation in production environments
+
+- **Strict Subdomain Mode Detection** (`t=s`): Informational flag
+  - Detects strict subdomain restriction flag
+  - Displayed as informational text (not warning)
+  - Message: "DKIM uses strict subdomain mode (t=s)"
+  - Does NOT affect DKIM status (remains "success")
+
+- **Revoked Key Detection** (`p=` empty): Error detection
+  - Detects intentionally disabled DKIM keys
+  - Returns error status with message: "DKIM key is revoked (p= is empty)"
+  - Indicates DKIM record has been decommissioned
+
+- **Weak Hash Algorithm Detection** (`h=sha1`): Security warning
+  - Detects deprecated SHA1 hash algorithm
+  - Returns warning status with message: "DKIM uses SHA1 hash algorithm (h=sha1)"
+  - Recommendation: "SHA1 is deprecated and insecure. Upgrade to SHA256 (h=sha256)"
+
+- **Key Type Validation** (`k=`): Configuration check
+  - Validates key type is `rsa` or `ed25519`
+  - Warning for unknown key types
+  - Helps identify configuration errors
+
+### Fixed
+
+#### Message Correlation System
+- **Final Status Update Job Enhancement**: Fixed correlations not updating when Postfix logs arrive milliseconds after correlation creation
+  - Increased batch size from 100 to 500 correlations per run for faster processing
+  - Fixes race condition where `status=sent` logs arrived seconds after correlation was marked complete
+  - Improved logging to show how many logs were added to each correlation
+
+#### Postfix Log Deduplication
+- **UNIQUE Constraint Added**: Postfix logs now have database-level duplicate prevention
+  - Automatic cleanup of existing duplicate logs on startup (keeps oldest entry)
+  - Import process now silently skips duplicate logs (no error logging)
+  - Batched deletion (1000 records at a time) to prevent database locks
+  - Handles NULL `queue_id` values correctly using `COALESCE`
+  - Prevents duplicate log imports when fetch job runs faster than log generation rate
+  - Improved logging shows count of duplicates skipped during import
+
+### Technical
+
+#### New API Endpoints
+```
+GET  /api/dmarc/domains?days=30
+GET  /api/dmarc/domains/{domain}/overview?days=30
+GET  /api/dmarc/domains/{domain}/reports?days=30
+GET  /api/dmarc/domains/{domain}/sources?days=30
+POST /api/dmarc/upload
+GET /api/dmarc/imap/status
+POST /api/dmarc/imap/sync
+GET /api/dmarc/imap/history
+POST /api/settings/test/smtp
+POST /api/settings/test/imap
+```
+
+---
+
 ## [1.4.8] - 2026-01-08
 
 ### Added

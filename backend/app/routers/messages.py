@@ -363,7 +363,12 @@ async def get_message_full_details(
                 "ip": rspamd_log.ip,
                 "user": rspamd_log.user,
                 "has_auth": rspamd_log.has_auth,
-                "size": rspamd_log.size
+                "size": rspamd_log.size,
+                "country_code": rspamd_log.country_code,
+                "country_name": rspamd_log.country_name,
+                "city": rspamd_log.city,
+                "asn": rspamd_log.asn,
+                "asn_org": rspamd_log.asn_org
             } if rspamd_log else None,
             "postfix_by_recipient": _group_postfix_by_recipient(postfix_logs),
             "postfix": [

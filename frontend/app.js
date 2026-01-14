@@ -9,6 +9,8 @@
 
 // Authentication state
 let authCredentials = null;
+// DMARC imap
+let dmarcImapStatus = null;
 
 // Load saved credentials from sessionStorage
 function loadAuthCredentials() {
@@ -789,7 +791,7 @@ function switchTab(tab) {
     } else {
         console.error(`Tab content not found: content-${tab}`);
     }
-    
+
     // Load tab data
     console.log('Loading data for tab:', tab);
     switch (tab) {
@@ -813,6 +815,9 @@ function switchTab(tab) {
             break;
         case 'domains':
             loadDomains();
+            break;
+        case 'dmarc':
+            loadDmarc();
             break;
         case 'settings':
             loadSettings();
@@ -1895,7 +1900,7 @@ function renderStatusCorrelation(correlation, incompleteList) {
 function renderStatusJobs(jobs) {
     const container = document.getElementById('status-jobs');
     container.innerHTML = `
-        <div class="space-y-3">
+        <div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
             ${renderJobCard('Fetch Logs', jobs.fetch_logs)}
             ${renderJobCard('Complete Correlations', jobs.complete_correlations)}
             ${renderJobCard('Update Final Status', jobs.update_final_status)}
@@ -1903,6 +1908,9 @@ function renderStatusJobs(jobs) {
             ${renderJobCard('Cleanup Logs', jobs.cleanup_logs)}
             ${renderJobCard('Check App Version', jobs.check_app_version)}
             ${renderJobCard('DNS Check (All Domains)', jobs.dns_check)}
+            ${renderJobCard('Sync Active Domains', jobs.sync_local_domains)}
+            ${renderJobCard('DMARC IMAP Import', jobs.dmarc_imap_sync)}
+            ${renderJobCard('Update MaxMind Databases', jobs.update_geoip)}
         </div>
     `;
 }
@@ -2196,25 +2204,31 @@ function renderOverviewTab(content, data) {
                     </div>
                 </div>
                 ${data.rspamd ? `
-                    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 mt-1">
-                    <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-3">Quick Spam Summary</h4>
-                    <div class="grid grid-cols-3 gap-4">
-                        <div class="text-center">
-                            <p class="text-2xl font-bold ${data.rspamd.score >= (data.rspamd.required_score || 15) ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">${data.rspamd.score.toFixed(2)}</p>
-                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Score</p>
+                    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3 sm:p-4 mt-1">
+                        <h4 class="text-sm sm:text-md font-semibold text-gray-900 dark:text-white mb-3">Quick Spam Summary</h4>
+                        <div class="grid grid-cols-3 gap-2">
+                            <div class="text-center">
+                                <p class="text-lg sm:text-2xl font-bold ${data.rspamd.score >= (data.rspamd.required_score || 15) ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">
+                                    ${data.rspamd.score.toFixed(2)}
+                                </p>
+                                <p class="text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">Score</p>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-sm sm:text-lg font-semibold text-gray-900 dark:text-white truncate">
+                                    ${data.rspamd.action}
+                                </p>
+                                <p class="text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">Action</p>
+                            </div>
+                            <div class="text-center">
+                                <p class="text-sm sm:text-lg font-semibold ${data.rspamd.is_spam ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">
+                                    ${data.rspamd.is_spam ? 'SPAM' : 'CLEAN'}
+                                </p>
+                                <p class="text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">Class</p>
+                            </div>
                         </div>
-                        <div class="text-center">
-                            <p class="text-lg font-semibold text-gray-900 dark:text-white">${data.rspamd.action}</p>
-                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Action</p>
-                        </div>
-                        <div class="text-center">
-                            <p class="text-lg font-semibold ${data.rspamd.is_spam ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">${data.rspamd.is_spam ? 'SPAM' : 'CLEAN'}</p>
-                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Classification</p>
-                        </div>
-                    </div>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 text-center mt-3">
-                        Click "Spam Analysis" tab for detailed breakdown
-                    </p>
+                        <p class="text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 text-center mt-3">
+                            See "Spam Analysis" tab for details
+                        </p>
                     </div>
                 ` : data.postfix && data.postfix.length > 0 ? `
                     <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-3">
@@ -2240,7 +2254,7 @@ function renderOverviewTab(content, data) {
                             <div class="flex-1">
                                 <p class="text-sm font-medium text-blue-900 dark:text-blue-300 mb-2">Additional Details</p>
                                 <div class="space-y-1 text-xs text-blue-800 dark:text-blue-400">
-                                    ${data.rspamd.ip ? `<p>Source IP: ${data.rspamd.ip}</p>` : ''}
+                                    ${data.rspamd.ip ? renderGeoIPInfo(data.rspamd, '16x12') : ''}
                                     ${data.rspamd.user ? `<p>Authenticated User: ${escapeHtml(data.rspamd.user)}</p>` : ''}
                                     ${data.rspamd.size ? `<p>Message Size: ${formatSize(data.rspamd.size)}</p>` : ''}
                                     ${data.rspamd.has_auth ? `<p>Authentication: Verified (MAILCOW_AUTH)</p>` : ''}
@@ -2477,26 +2491,32 @@ function renderSpamTab(content, data) {
     
     content.innerHTML = `
         <div class="space-y-6">
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg text-center">
-                    <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Spam Score</p>
-                    <p class="text-3xl font-bold ${data.rspamd.score >= (data.rspamd.required_score || 15) ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">${data.rspamd.score.toFixed(2)}</p>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Threshold: ${data.rspamd.required_score || 15}</p>
+            <div class="grid grid-cols-3 gap-2 sm:gap-4">
+                <div class="bg-gray-50 dark:bg-gray-700/50 p-2 sm:p-4 rounded-lg text-center">
+                    <p class="text-[10px] sm:text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1 sm:mb-2 truncate">Score</p>
+                    <p class="text-lg sm:text-3xl font-bold ${data.rspamd.score >= (data.rspamd.required_score || 15) ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">
+                        ${data.rspamd.score.toFixed(2)}
+                    </p>
+                    <p class="text-[9px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">Limit: ${data.rspamd.required_score || 15}</p>
                 </div>
-                <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg text-center">
-                    <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Action Taken</p>
-                    <p class="text-xl font-semibold text-gray-900 dark:text-white">${data.rspamd.action}</p>
+                <div class="bg-gray-50 dark:bg-gray-700/50 p-2 sm:p-4 rounded-lg text-center">
+                    <p class="text-[10px] sm:text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1 sm:mb-2 truncate">Action</p>
+                    <p class="text-sm sm:text-xl font-semibold text-gray-900 dark:text-white truncate">
+                        ${data.rspamd.action}
+                    </p>
                 </div>
-                <div class="bg-gray-50 dark:bg-gray-700/50 p-4 rounded-lg text-center">
-                    <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Classification</p>
-                    <p class="text-xl font-semibold ${data.rspamd.is_spam ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">${data.rspamd.is_spam ? 'SPAM' : 'CLEAN'}</p>
+                <div class="bg-gray-50 dark:bg-gray-700/50 p-2 sm:p-4 rounded-lg text-center">
+                    <p class="text-[10px] sm:text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1 sm:mb-2 truncate">Class</p>
+                    <p class="text-sm sm:text-xl font-semibold ${data.rspamd.is_spam ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">
+                        ${data.rspamd.is_spam ? 'SPAM' : 'CLEAN'}
+                    </p>
                 </div>
             </div>
             
             ${data.rspamd.symbols && Object.keys(data.rspamd.symbols).length > 0 ? `
                 <div>
                     <h4 class="text-md font-semibold text-gray-900 dark:text-white mb-3">Detection Symbols</h4>
-                    <div class="space-y-2 max-h-96 overflow-y-auto">
+                    <div class="space-y-2 max-h-[29rem] overflow-y-auto">
                         ${Object.entries(data.rspamd.symbols)
                             .sort((a, b) => {
                                 const scoreA = a[1].score || a[1].metric_score || 0;
@@ -2587,7 +2607,7 @@ function updateSecurityTabIndicator(data) {
     const hasSecurityEvents = data.netfilter && data.netfilter.length > 0;
     const indicator = hasSecurityEvents ? '🔴' : '🟢';
     
-    securityTab.innerHTML = `<span class="text-sm font-medium">Security ${indicator}</span>`;
+    securityTab.innerHTML = `<span class="text-xs sm:text-sm font-medium">Security ${indicator}</span>`;
 }
 
 function closeMessageModal() {
@@ -2607,11 +2627,14 @@ function closeMessageModal() {
 
 function showChangelogModal(changelog) {
     const modal = document.getElementById('changelog-modal');
+    const modalTitle = modal?.querySelector('h3');
     const content = document.getElementById('changelog-content');
+    
     if (modal && content) {
-        // Render markdown if marked.js is available, otherwise show as plain text
+        if (modalTitle) {
+            modalTitle.textContent = 'Changelog';
+        }
         if (typeof marked !== 'undefined' && changelog) {
-            // Configure marked options
             marked.setOptions({
                 breaks: true,
                 gfm: true
@@ -2630,8 +2653,107 @@ function closeChangelogModal() {
     if (modal) {
         modal.classList.add('hidden');
         document.body.style.overflow = '';
+        const modalTitle = modal.querySelector('h3');
+        if (modalTitle) {
+            modalTitle.textContent = 'Changelog';
+        }
     }
 }
+
+// =============================================================================
+// GEOIP RENDERING AND FLAGS
+// =============================================================================
+
+function getFlagUrl(countryCode, size = '24x18') {
+    if (!countryCode || countryCode.length !== 2) {
+        return null;
+    }
+    return `/static/assets/flags/${size}/${countryCode.toLowerCase()}.png`;
+}
+
+function renderGeoIPInfo(rspamdData, size = '24x18') {
+    if (!rspamdData || !rspamdData.ip) {
+        return '';
+    }
+
+    const ip = rspamdData.ip;
+    const hasGeoIP = rspamdData.country_code;
+
+    if (!hasGeoIP) {
+        return `<p>Source IP: ${escapeHtml(ip)}</p>`;
+    }
+
+    const flagUrl = getFlagUrl(rspamdData.country_code, size);
+    const [width, height] = size.split('x').map(Number);
+
+    // Use a list to store the parts of the info string
+    let parts = [`<strong>${escapeHtml(ip)}</strong>`];
+
+    if (rspamdData.country_name && flagUrl) {
+        // Wrap image and country name in a span to keep them together and aligned
+        const countryPart = 
+            `<br><span style="display: inline-flex; align-items: baseline; gap: 4px; vertical-align: baseline; margin-top: 5px;">` +
+                `<img src="${flagUrl}" alt="${escapeHtml(rspamdData.country_name)}" ` +
+                `style="width:${width}px; height:${height}px; display: block;" ` +
+                `onerror="this.style.display='none'">` +
+                `${escapeHtml(rspamdData.country_name)}` +
+            `</span>`;
+        parts.push(countryPart);
+    }
+
+    if (rspamdData.city) {
+        parts.push(escapeHtml(rspamdData.city));
+    }
+
+    if (rspamdData.asn_org) {
+        parts.push(`(${escapeHtml(rspamdData.asn_org)})`);
+    }
+
+    // Use white-space: nowrap on the container if you want to prevent the whole line from breaking
+    return `<p style="margin: 0;">Source: ${parts.join(' ')}</p>`;
+}
+
+function renderGeoIPForDMARC(record, size = '24x18') {
+    if (!record || !record.source_ip) {
+        return '';
+    }
+    
+    const ip = record.source_ip;
+    const hasGeoIP = record.country_code;
+    
+    if (!hasGeoIP) {
+        return escapeHtml(ip);
+    }
+    
+    // Build flag URL
+    const flagUrl = getFlagUrl(record.country_code, size);
+    const [width, height] = size.split('x').map(Number);
+    
+    // Build location string
+    let parts = [];
+    
+    if (record.country_name) {
+        parts.push(escapeHtml(record.country_name));
+    }
+    
+    if (record.city) {
+        parts.push(escapeHtml(record.city));
+    }
+    
+    if (record.asn_org) {
+        parts.push(escapeHtml(record.asn_org));
+    }
+    
+    const locationText = parts.join(', ');
+    
+    // Return flag + location inline
+    if (flagUrl && locationText) {
+        return `<img src="${flagUrl}" alt="${escapeHtml(record.country_name || '')}" style="width:${width}px; height:${height}px; vertical-align:middle; margin-right:4px;" onerror="this.style.display='none'">${locationText}`;
+    }
+    
+    return locationText || escapeHtml(ip);
+}
+
 
 // =============================================================================
 // EXPORT CSV
@@ -2861,10 +2983,16 @@ function getActionClass(action) {
 }
 
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    let cleanText = String(text).replace(/\\"/g, '"');
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return cleanText.replace(/[&<>"']/g, function(m) { return map[m]; });
 }
 
 // =============================================================================
@@ -3035,54 +3163,40 @@ function renderDomains(container, data) {
     
     // Summary cards
     const summaryHTML = `
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">Total Domains</p>
-                        <p class="text-3xl font-bold text-gray-900 dark:text-white mt-1">${data.total || 0}</p>
-                    </div>
-                    <div class="bg-blue-100 dark:bg-blue-900/30 rounded-lg p-3">
-                        <svg class="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
-                        </svg>
-                    </div>
+        <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-4 border border-gray-200 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total</h3>
+                    <svg class="w-5 h-5 text-blue-500 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
+                    </svg>
                 </div>
+                <p class="text-2xl font-bold text-gray-900 dark:text-white">${data.total || 0}</p>
             </div>
-            
-            <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">Active Domains</p>
-                        <p class="text-3xl font-bold text-green-600 dark:text-green-400 mt-1">${data.active || 0}</p>
-                    </div>
-                    <div class="bg-green-100 dark:bg-green-900/30 rounded-lg p-3">
-                        <svg class="w-8 h-8 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                        </svg>
-                    </div>
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-4 border border-gray-200 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Active</h3>
+                    <svg class="w-5 h-5 text-green-500 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
                 </div>
+                <p class="text-2xl font-bold text-green-600 dark:text-green-400">${data.active || 0}</p>
             </div>
-            
-            <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-6">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">Inactive Domains</p>
-                        <p class="text-3xl font-bold text-gray-500 dark:text-gray-400 mt-1">${(data.total || 0) - (data.active || 0)}</p>
-                    </div>
-                    <div class="bg-gray-100 dark:bg-gray-700 rounded-lg p-3">
-                        <svg class="w-8 h-8 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path>
-                        </svg>
-                    </div>
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm p-4 border border-gray-200 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Inactive</h3>
+                    <svg class="w-5 h-5 text-gray-400 opacity-80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path>
+                    </svg>
                 </div>
+                <p class="text-2xl font-bold text-gray-600 dark:text-gray-400">${(data.total || 0) - (data.active || 0)}</p>
             </div>
         </div>
     `;
     
     // Search/Filter bar
     const filterHTML = `
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 mb-4">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 px-4 py-2">
             <div class="flex items-center gap-3 flex-wrap">
                 <div class="flex items-center gap-3 flex-1 min-w-0">
                     <svg class="w-5 h-5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3095,25 +3209,25 @@ function renderDomains(container, data) {
                         class="flex-1 px-3 py-2 text-sm border-0 bg-transparent text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-0 min-w-0"
                         oninput="filterDomains()"
                     >
-                </div>
-                
-                <div class="flex items-center gap-4 flex-shrink-0">
-                    <!-- Filter: Show only domains with issues -->
-                    <label class="flex items-center gap-2 cursor-pointer">
-                        <input 
-                            type="checkbox" 
-                            id="filter-issues-only"
-                            class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
-                            onchange="filterDomains()"
-                        >
-                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">Show issues only</span>
-                    </label>
-                    
                     <!-- Domain count badge -->
                     <span id="domain-count-badge" class="px-3 py-1 text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full whitespace-nowrap">
                         ${domains.length} domains
                     </span>
                 </div>
+            </div>
+        </div>
+        <div class="flex items-center gap-4 py-4 text-sm font-medium text-gray-300 pl-10">
+            <div class="flex items-center gap-4 flex-shrink-0">
+                <!-- Filter: Show only domains with issues -->
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input 
+                        type="checkbox" 
+                        id="filter-issues-only"
+                        class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+                        onchange="filterDomains()"
+                    >
+                    <span class="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">Show only domains with issues</span>
+                </label>
             </div>
         </div>
     `;
@@ -3406,17 +3520,17 @@ function toggleDomainDetails(domainId) {
 
 function renderDNSCheck(type, check) {
     const statusColors = {
-        'success': 'border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20',
-        'warning': 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20',
-        'error': 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20',
-        'unknown': 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800'
+        'success': 'border-green-500 bg-green-50 dark:bg-green-900/20',
+        'warning': 'border-amber-500 bg-amber-50 dark:bg-amber-900/20',
+        'error': 'border-red-500 bg-red-50 dark:bg-red-900/20',
+        'unknown': 'border-gray-300 bg-gray-50 dark:bg-gray-800'
     };
     
     const statusTextColors = {
-        'success': 'text-green-700 dark:text-green-300',
-        'warning': 'text-amber-700 dark:text-amber-300',
-        'error': 'text-red-700 dark:text-red-300',
-        'unknown': 'text-gray-500 dark:text-gray-400'
+        'success': 'text-green-700 dark:text-green-400',
+        'warning': 'text-amber-700 dark:text-amber-400',
+        'error': 'text-red-700 dark:text-red-400',
+        'unknown': 'text-gray-600 dark:text-gray-400'
     };
     
     const statusIcons = {
@@ -3455,6 +3569,16 @@ function renderDNSCheck(type, check) {
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
                             </svg>
                             <span>${escapeHtml(warning)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : ''}
+            
+            ${check.info && check.info.length > 0 ? `
+                <div class="mt-3 space-y-1">
+                    ${check.info.map(info => `
+                        <div class="text-xs text-gray-600 dark:text-gray-400 px-2 py-1 bg-gray-50 dark:bg-gray-800/50 rounded">
+                            ${escapeHtml(info)}
                         </div>
                     `).join('')}
                 </div>
@@ -3948,6 +4072,40 @@ function renderSettings(content, data) {
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Mailcow URL</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1 font-mono break-all">${escapeHtml(config.mailcow_url || 'N/A')}</p>
                     </div>
+                    <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Server IP</p>
+                        <p class="text-sm text-gray-900 dark:text-white mt-1 font-mono">
+                            ${config.server_ip ? 
+                                `<span class="inline-flex items-center gap-1.5">
+                                    <svg class="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                    </svg>
+                                    ${escapeHtml(config.server_ip)}
+                                </span>` 
+                                : '<span class="text-gray-400">Not available</span>'
+                            }
+                        </p>
+                    </div>
+                    <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Authentication</p>
+                        <p class="text-sm text-gray-900 dark:text-white mt-1">
+                            ${config.auth_enabled ? 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                                    <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                    </svg>
+                                    Enabled
+                                </span>` : 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
+                                    Disabled
+                                </span>`
+                            }
+                        </p>
+                        ${config.auth_enabled && config.auth_username ? 
+                            `<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Username: ${escapeHtml(config.auth_username)}</p>` : 
+                            ''
+                        }
+                    </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg ${config.local_domains && config.local_domains.length > 0 ? 'col-span-1 md:col-span-2 lg:col-span-3' : ''}">
                         <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">
                             Local Domains
@@ -4014,25 +4172,113 @@ function renderSettings(content, data) {
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.scheduler_workers || 4}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Authentication</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">MaxMind Status</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">
-                            ${config.auth_enabled ? 
+                            ${renderMaxMindStatus(data.configuration.maxmind_status)}
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Global SMTP Configuration -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                    </svg>
+                    Global SMTP Configuration
+                </h3>
+            </div>
+            <div class="p-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">SMTP Enabled</p>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            ${data.smtp_configuration?.enabled ? 
                                 `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
                                     <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
                                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
                                     </svg>
                                     Enabled
                                 </span>` : 
-                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
-                                    Disabled
-                                </span>`
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">Disabled</span>`
+                            }
+                            <button onclick="testSmtpConnection()" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors duration-200 flex items-center gap-1.5">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <span>Test SMTP</span>
+                            </button>
+                        </div>
+                    </div>
+                    ${data.smtp_configuration?.enabled ? `
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Server</p>
+                        <p class="text-sm text-gray-900 dark:text-white font-mono">${data.smtp_configuration.host}:${data.smtp_configuration.port}</p>
+                    </div>
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Admin Email</p>
+                        <p class="text-sm text-gray-900 dark:text-white font-mono">${data.smtp_configuration.admin_email || 'N/A'}</p>
+                    </div>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+
+        <!-- DMARC Management -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                    <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                    </svg>
+                    DMARC Management
+                </h3>
+            </div>
+            <div class="p-4">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">IMAP Auto-Import</p>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            ${data.dmarc_configuration?.imap_sync_enabled ? 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                                    <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                    </svg>
+                                    Enabled
+                                </span>` : 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">Disabled</span>`
+                            }
+                            <button onclick="testImapConnection()" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors duration-200 flex items-center gap-1.5">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <span>Test IMAP</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Manual Upload</p>
+                        <p class="text-sm text-gray-900 dark:text-white">
+                            ${data.dmarc_configuration?.manual_upload_enabled ? 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                                    <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                                    </svg>
+                                    Enabled
+                                </span>` : 
+                                `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">Disabled</span>`
                             }
                         </p>
-                        ${config.auth_enabled && config.auth_username ? 
-                            `<p class="text-xs text-gray-500 dark:text-gray-400 mt-1">Username: ${escapeHtml(config.auth_username)}</p>` : 
-                            ''
-                        }
                     </div>
+                    ${data.dmarc_configuration?.imap_sync_enabled ? `
+                    <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">IMAP Server</p>
+                        <p class="text-sm text-gray-900 dark:text-white font-mono">${data.dmarc_configuration.imap_host || 'N/A'}</p>
+                    </div>
+                    ` : ''}
                 </div>
             </div>
         </div>
@@ -4175,6 +4421,36 @@ function renderSettings(content, data) {
             }
         };
     }
+}
+
+function renderMaxMindStatus(status) {
+    if (!status || !status.configured) {
+        return `
+            <span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">
+                Not configured
+            </span>
+        `;
+    }
+    
+    if (status.valid) {
+        return `
+            <span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+                </svg>
+                Configured
+            </span>
+        `;
+    }
+    
+    return `
+        <span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+            <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+            </svg>
+            ${escapeHtml(status.error || 'Invalid')}
+        </span>
+    `;
 }
 
 function renderImportCard(title, data, color) {
@@ -4320,6 +4596,1148 @@ function showToast(message, type = 'info') {
             setTimeout(() => toast.remove(), 300);
         }
     }, 4000);
+}
+
+// =============================================================================
+// DMARC PAGE
+// =============================================================================
+
+// DMARC Navigation State
+let dmarcState = {
+    currentView: 'domains',
+    currentDomain: null,
+    currentSubTab: 'reports',
+    currentReportDate: null,
+    currentSourceIp: null,
+    chartInstance: null
+};
+
+async function loadDmarc() {
+    console.log('Loading DMARC tab...');
+    dmarcState.currentView = 'domains';
+    dmarcState.currentDomain = null;
+    await loadDmarcImapStatus();
+    await loadDmarcDomains();
+}
+
+function getFlagEmoji(countryCode) {
+    if (!countryCode || countryCode.length !== 2) return '🌍';
+    const codePoints = countryCode
+        .toUpperCase()
+        .split('')
+        .map(char => 127397 + char.charCodeAt(0));
+    return String.fromCodePoint(...codePoints);
+}
+
+// =============================================================================
+// DOMAINS LIST
+// =============================================================================
+
+function getPolicyBadgeClass(policy) {
+    switch (policy) {
+        case 'reject':
+            return 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300';
+        case 'quarantine':
+            return 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300';
+        case 'none':
+        default:
+            return 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300';
+    }
+}
+
+async function loadDmarcDomains() {
+    try {
+        const response = await authenticatedFetch('/api/dmarc/domains');
+        if (!response.ok) throw new Error('Failed to load domains');
+        
+        const data = await response.json();
+        const domains = data.domains || [];
+
+        const totalMessages = domains.reduce((sum, d) => sum + (d.stats_30d?.total_messages || 0), 0);
+        const totalUniqueIps = domains.reduce((sum, d) => sum + (d.stats_30d?.unique_ips || 0), 0);
+        const totalPass = domains.reduce((sum, d) => {
+            const msgs = d.stats_30d?.total_messages || 0;
+            const pct = d.stats_30d?.dmarc_pass_pct || 0;
+            return sum + (msgs * pct / 100);
+        }, 0);
+        const overallPassPct = totalMessages > 0 ? Math.round((totalPass / totalMessages) * 100) : 0;
+        
+        const mainStatsContainer = document.getElementById('dmarc-main-stats-container');
+        if (mainStatsContainer) {
+            mainStatsContainer.innerHTML = `
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">Total Domains</h3>
+                            <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>
+                        </div>
+                        <div class="text-2xl font-bold text-gray-900 dark:text-white">${data.total || 0}</div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">Total Messages</h3>
+                            <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                        </div>
+                        <div class="text-2xl font-bold text-gray-900 dark:text-white">${totalMessages.toLocaleString()}</div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">DMARC Pass</h3>
+                            <svg class="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                        </div>
+                        <div class="text-2xl font-bold text-green-600 dark:text-green-400">${overallPassPct}%</div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">Unique IPs</h3>
+                            <svg class="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        </div>
+                        <div class="text-2xl font-bold text-gray-900 dark:text-white">${totalUniqueIps.toLocaleString()}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        const domainsList = document.getElementById('dmarc-domains-list');
+
+        if (domains.length === 0) {
+            domainsList.innerHTML = `<tr><td colspan="5" class="px-6 py-12 text-center text-gray-500 dark:text-gray-400 text-sm">No domains found in the reporting period.</td></tr>`;
+            return;
+        }
+
+        domainsList.innerHTML = domains.map(domain => {
+            const stats = domain.stats_30d || {};
+            const passRate = stats.dmarc_pass_pct || 0;
+            
+            // Status colors
+            const passColor = passRate >= 95 ? 'text-green-500' : passRate >= 80 ? 'text-yellow-500' : 'text-red-500';
+            const barBg = passRate >= 95 ? 'bg-green-500' : passRate >= 80 ? 'bg-yellow-500' : 'bg-red-500';
+            const badgeBg = passRate >= 95 ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400';
+
+            const firstDate = domain.first_report ? new Date(domain.first_report * 1000).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) : '-';
+            const lastDate = domain.last_report ? new Date(domain.last_report * 1000).toLocaleDateString('en-US', {month: 'short', day: 'numeric'}) : '-';
+
+            return `
+                <tr class="hidden md:table-row hover:bg-gray-700/30 cursor-pointer transition-colors" onclick="loadDomainOverview('${escapeHtml(domain.domain)}')">
+                    <td class="px-6 py-4 border-r border-gray-700/50 text-base font-bold text-blue-400 hover:underline">
+                        ${escapeHtml(domain.domain)}
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-400 border-r border-gray-700/50">
+                        ${firstDate} - ${lastDate}
+                    </td>
+                    <td class="px-6 py-4 text-center text-sm text-gray-100 border-r border-gray-700/50">
+                        ${domain.report_count || 0}
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-100 font-bold border-r border-gray-700/50">
+                        ${(stats.total_messages || 0).toLocaleString()}
+                    </td>
+                    <td class="px-6 py-4 text-sm text-gray-100 font-bold border-r border-gray-700/50">
+                        ${stats.unique_ips || 0}
+                    </td>
+                    <td class="px-6 py-4">
+                        <div class="flex items-center gap-3">
+                            <span class="text-sm font-bold ${passColor} min-w-[40px]">${passRate}%</span>
+                            <div class="w-16 bg-gray-700 rounded-full h-1.5 overflow-hidden">
+                                <div class="${barBg} h-full" style="width: ${passRate}%"></div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+
+                <div class="md:hidden block mb-4 mx-2 rounded-2xl p-5 hover:opacity-90 cursor-pointer transition-all shadow-lg" 
+                    style="background-color: #1f2937 !important;"
+                    onclick="loadDomainOverview('${escapeHtml(domain.domain)}')">
+                    
+                    <div class="flex justify-between items-center mb-1">
+                        <div class="text-base font-bold text-blue-400">${escapeHtml(domain.domain)}</div>
+                        <span class="px-2.5 py-1 text-[11px] font-bold rounded-lg ${badgeBg}">
+                            ${passRate}% Pass
+                        </span>
+                    </div>
+                    
+                    <div class="w-full bg-gray-700 rounded-full h-1.5 overflow-hidden mb-6">
+                        <div class="${barBg} h-full" style="width: ${passRate}%"></div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-x-8 gap-y-6">
+                        <div class="border-l-[3px] border-blue-500/50 pl-3">
+                            <div class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Messages</div>
+                            <div class="text-sm font-bold text-white">${(stats.total_messages || 0).toLocaleString()}</div>
+                        </div>
+                        <div class="border-l-[3px] border-purple-500/50 pl-3">
+                            <div class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Unique IPs</div>
+                            <div class="text-sm font-bold text-white">${stats.unique_ips || 0}</div>
+                        </div>
+                        <div class="border-l-[3px] border-gray-500/50 pl-3">
+                            <div class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Reports</div>
+                            <div class="text-sm font-bold text-white">${domain.report_count || 0}</div>
+                        </div>
+                        <div class="border-l-[3px] border-orange-500/50 pl-3">
+                            <div class="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Period</div>
+                            <div class="text-sm font-bold text-white">${firstDate} - ${lastDate}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+    } catch (error) {
+        console.error('Error loading DMARC domains:', error);
+    }
+}
+
+async function loadDomainOverview(domain) {
+    dmarcState.currentView = 'overview';
+    dmarcState.currentDomain = domain;
+    
+    document.getElementById('dmarc-domains-view').classList.add('hidden');
+    document.getElementById('dmarc-overview-view').classList.remove('hidden');
+    document.getElementById('dmarc-back-btn').classList.remove('hidden');
+    document.getElementById('dmarc-page-title').textContent = domain;
+    
+    try {
+        const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/overview?days=30`);
+        const data = await response.json();
+        const totals = data.totals || {};
+        
+        // Render the stats grid with 3 columns on mobile and icons
+        // This replaces the old manual textContent updates
+        const statsContainer = document.getElementById('dmarc-overview-stats-container');
+        if (statsContainer) {
+            statsContainer.innerHTML = `
+                <div class="grid grid-cols-3 gap-2 sm:gap-4 mb-6">
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-3 sm:p-6 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-1 sm:mb-2">
+                            <h3 class="text-[10px] sm:text-sm font-medium text-gray-500 dark:text-gray-400">Total Messages</h3>
+                            <svg class="w-5 h-5 sm:w-7 sm:h-7 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-lg sm:text-3xl font-bold text-gray-900 dark:text-white">${(totals.total_messages || 0).toLocaleString()}</div>
+                        <div class="text-[9px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">Last 30 days</div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-3 sm:p-6 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-1 sm:mb-2">
+                            <h3 class="text-[10px] sm:text-sm font-medium text-gray-500 dark:text-gray-400">DMARC Pass</h3>
+                            <svg class="w-5 h-5 sm:w-7 sm:h-7 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-lg sm:text-3xl font-bold text-green-600 dark:text-green-400">${totals.dmarc_pass_pct ? `${totals.dmarc_pass_pct}%` : '-'}</div>
+                        <div class="text-[9px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">SPF + DKIM Pass</div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-3 sm:p-6 border border-gray-100 dark:border-gray-700">
+                        <div class="flex items-center justify-between mb-1 sm:mb-2">
+                            <h3 class="text-[10px] sm:text-sm font-medium text-gray-500 dark:text-gray-400">Sources</h3>
+                            <svg class="w-5 h-5 sm:w-7 sm:h-7 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path>
+                            </svg>
+                        </div>
+                        <div class="text-lg sm:text-3xl font-bold text-gray-900 dark:text-white">${(totals.unique_ips || 0).toLocaleString()}</div>
+                        <div class="text-[9px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">${totals.unique_reporters || 0} reporters</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        renderDmarcChart(data.daily_stats || []);
+        
+        if (dmarcState.currentSubTab === 'reports') {
+            await loadDomainReports(domain);
+        } else {
+            await loadDomainSources(domain);
+        }
+    } catch (error) {
+        console.error('Error loading domain overview:', error);
+    }
+}
+
+function renderDmarcChart(dailyStats) {
+    const canvas = document.getElementById('dmarc-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    if (dmarcState.chartInstance) {
+        dmarcState.chartInstance.destroy();
+    }
+    
+    // Fix: Remove * 1000 because d.date is an ISO string, not a timestamp
+    const labels = dailyStats.map(d => {
+        const date = new Date(d.date);
+        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    });
+    
+    dmarcState.chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Total Messages',
+                    data: dailyStats.map(d => d.total || 0), // Use 'total' from dmarc.py
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                },
+                {
+                    label: 'DMARC Pass',
+                    data: dailyStats.map(d => d.dmarc_pass || 0), // Use 'dmarc_pass' from dmarc.py
+                    borderColor: '#10b981',
+                    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { y: { beginAtZero: true } }
+        }
+    });
+}
+
+async function loadDomainReports(domain) {
+    try {
+        const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/reports?days=30`);
+        const data = await response.json();
+        const reports = data.data || [];
+        const reportsList = document.getElementById('dmarc-reports-list');
+        
+        if (reports.length === 0) {
+            reportsList.innerHTML = `<div class="text-center py-12"><p class="text-gray-500 text-sm">No daily reports available.</p></div>`;
+            return;
+        }
+        
+        reportsList.innerHTML = reports.map(report => {
+            const date = new Date(report.date);
+            const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            const passPct = report.dmarc_pass_pct || 0;
+            const passColor = passPct >= 95 ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+            
+            return `
+                <div class="bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 rounded-xl p-3 mb-4 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors" onclick="loadReportDetails('${escapeHtml(domain)}', '${report.date}')">
+                    
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="p-2 bg-white dark:bg-gray-800 rounded-lg shadow-sm flex-shrink-0">
+                                <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                                </svg>
+                            </div>
+                            <div class="text-sm font-bold text-blue-600 dark:text-blue-400 hover:underline">${dateStr}</div>
+                        </div>
+                        
+                        <span class="inline-flex items-center px-2.5 py-1 text-xs font-bold rounded-lg ${passColor}">
+                            ${passPct}% Pass
+                        </span>
+                    </div>
+
+                    <div class="border-t border-gray-200 dark:border-gray-600 my-3"></div>
+
+                    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                        <div class="flex items-center gap-1">
+                            <span class="font-bold text-gray-900 dark:text-white">${(report.total_messages || 0).toLocaleString()}</span>
+                            <span>messages</span>
+                        </div>
+                        <span class="hidden sm:block text-gray-300 dark:text-gray-600">•</span>
+                        <div>${report.unique_ips} Unique IPs</div>
+                        <span class="hidden sm:block text-gray-300 dark:text-gray-600">•</span>
+                        <div>${report.reports.length} Reporters</div>
+                    </div>
+                    
+                </div>`;
+        }).join('');
+    } catch (error) {
+        console.error('Error loading reports:', error);
+    }
+}
+
+async function loadDomainSources(domain) {
+    try {
+        const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/sources?days=30`);
+        if (!response.ok) throw new Error('Failed to load sources');
+        
+        const data = await response.json();
+        const sources = data.data || []; 
+        const sourcesList = document.getElementById('dmarc-sources-list');
+        
+        if (sources.length === 0) {
+            sourcesList.innerHTML = '<p class="text-center py-12 text-gray-500 text-sm">No sources found.</p>';
+            return;
+        }
+        
+        sourcesList.innerHTML = `
+            <div class="space-y-3">
+                ${sources.map(s => {
+                    const providerName = s.asn_org || 'Unknown Provider';
+                    const countryCode = s.country_code ? s.country_code.toLowerCase() : 'xx';
+                    const flagUrl = `/static/assets/flags/24x18/${countryCode}.png`;
+                    
+                    // Status Badge Logic
+                    const passPct = s.dmarc_pass_pct || 0;
+                    const passColor = passPct >= 95 ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400';
+
+                    return `
+                    <div class="bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 rounded-xl p-4 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shadow-sm" 
+                         onclick="loadSourceDetails('${escapeHtml(domain)}', '${escapeHtml(s.source_ip)}')">
+                        
+                        <div class="flex items-start justify-between gap-3">
+                            <div class="flex items-center gap-3 min-w-0 flex-1">
+                                <div class="p-2 bg-white dark:bg-gray-800 rounded-lg shadow-sm flex-shrink-0">
+                                    <img src="${flagUrl}" alt="${s.country_name || 'Unknown'}" class="w-5 h-3.5 object-cover rounded-sm">
+                                </div>
+                                <div class="min-w-0 flex-1">
+                                    <div class="text-sm font-bold text-blue-600 dark:text-blue-400 hover:underline truncate">${escapeHtml(providerName)}</div>
+                                    <div class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                                        ${escapeHtml(s.source_ip)} ${s.country_name ? `• ${escapeHtml(s.country_name)}` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <span class="inline-flex items-center px-2.5 py-1 text-xs font-bold rounded-lg ${passColor} flex-shrink-0">
+                                ${passPct}% Pass
+                            </span>
+                        </div>
+
+                        <div class="border-t border-gray-200 dark:border-gray-600 my-3"></div>
+
+                        <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+                            <div class="flex items-center gap-1">
+                                <span class="font-bold text-gray-900 dark:text-white">${(s.total_count || 0).toLocaleString()}</span>
+                                <span class="font-medium">messages</span>
+                            </div>
+                            <span class="text-gray-300 dark:text-gray-600">•</span>
+                            <div class="flex items-center gap-1">
+                                <span>SPF:</span>
+                                <span class="${s.spf_pass_pct >= 95 ? 'text-green-600 dark:text-green-400' : 'text-red-500'} font-bold">${s.spf_pass_pct}%</span>
+                            </div>
+                            <span class="text-gray-300 dark:text-gray-600">•</span>
+                            <div class="flex items-center gap-1">
+                                <span>DKIM:</span>
+                                <span class="${s.dkim_pass_pct >= 95 ? 'text-green-600 dark:text-green-400' : 'text-red-500'} font-bold">${s.dkim_pass_pct}%</span>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>
+        `;
+    } catch (error) {
+        console.error('Error loading sources:', error);
+    }
+}
+
+// =============================================================================
+// REPORT DETAILS
+// =============================================================================
+
+async function loadReportDetails(domain, reportDate) {
+    dmarcState.currentView = 'report_details';
+    dmarcState.currentReportDate = reportDate;
+    
+    document.getElementById('dmarc-overview-view').classList.add('hidden');
+    document.getElementById('dmarc-report-details-view').classList.remove('hidden');
+    document.getElementById('dmarc-source-details-view').classList.add('hidden');
+    
+    const dateObj = new Date(reportDate);
+    const dateStr = dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    document.getElementById('dmarc-page-title').textContent = `${domain} - ${dateStr}`;
+    
+    try {
+        const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/reports/${reportDate}/details`);
+        const data = await response.json();
+        const totals = data.totals || {};
+        
+        /* Inject icons and stats grid */
+        const statsContainer = document.getElementById('report-details-stats-container');
+        if (statsContainer) {
+            statsContainer.innerHTML = generateDetailStatsGrid(totals);
+        }
+        
+        const sources = data.sources || [];
+        const sourcesList = document.getElementById('report-detail-sources-list');
+        
+        if (sources.length === 0) {
+            sourcesList.innerHTML = '<p class="text-center py-12 text-gray-500">No sources found.</p>';
+            return;
+        }
+        
+        sourcesList.innerHTML = `
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">From: domain</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Envelope from: domain</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Volume</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">DMARC pass</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">SPF aligned</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">DKIM aligned</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reporter</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    ${sources.map(s => {
+                        const providerName = s.asn_org || s.source_name || 'Unknown';
+                        const countryCode = s.country_code ? s.country_code.toLowerCase() : 'xx';
+                        const flagUrl = `/static/assets/flags/48x36/${countryCode}.png`;
+                        const dmarcColor = s.dmarc_pass_pct >= 95 ? 'text-green-600 dark:text-green-400' : s.dmarc_pass_pct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        const spfColor = s.spf_pass_pct >= 95 ? 'text-green-600 dark:text-green-400' : s.spf_pass_pct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        const dkimColor = s.dkim_pass_pct >= 95 ? 'text-green-600 dark:text-green-400' : s.dkim_pass_pct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        
+                        return `
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer" onclick="loadSourceDetails('${escapeHtml(domain)}', '${escapeHtml(s.source_ip)}')">
+                            <td class="px-6 py-4">
+                                <div class="flex items-center gap-2">
+                                    <img src="${flagUrl}" alt="${s.country_name || 'Unknown'}" class="w-6 h-4 object-cover rounded-sm shadow-sm" style="border: 1px solid rgba(0,0,0,0.1);">
+                                    <div>
+                                        <div class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline">${escapeHtml(providerName)}</div>
+                                        <div class="text-xs text-gray-500">${escapeHtml(s.source_ip)}</div>
+                                    </div>
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(s.header_from || '-')}</td>
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(s.envelope_from || '-')}</td>
+                            <td class="px-6 py-4 text-sm text-right text-gray-900 dark:text-gray-100">${(s.volume || 0).toLocaleString()}</td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm font-medium ${dmarcColor}">${s.dmarc_pass_pct}%</span></td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm ${spfColor}">${s.spf_pass_pct}%</span></td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm ${dkimColor}">${s.dkim_pass_pct}%</span></td>
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(s.reporter || '-')}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (error) {
+        console.error('Error loading report details:', error);
+    }
+}
+
+
+// =============================================================================
+// SOURCE DETAILS
+// =============================================================================
+
+async function loadSourceDetails(domain, sourceIp) {
+    dmarcState.currentView = 'source_details';
+    dmarcState.currentSourceIp = sourceIp;
+    
+    document.getElementById('dmarc-overview-view').classList.add('hidden');
+    document.getElementById('dmarc-report-details-view').classList.add('hidden');
+    document.getElementById('dmarc-source-details-view').classList.remove('hidden');
+    document.getElementById('dmarc-page-title').textContent = `${domain} - ${sourceIp}`;
+    
+    try {
+        const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/sources/${encodeURIComponent(sourceIp)}/details?days=30`);
+        const data = await response.json();
+        
+        /* Update Header Info */
+        const countryCode = data.country_code ? data.country_code.toLowerCase() : 'xx';
+        const flagUrl = `/static/assets/flags/48x36/${countryCode}.png`;
+        document.getElementById('source-detail-flag').src = flagUrl;
+        document.getElementById('source-detail-name').textContent = data.source_name || data.asn_org || 'Unknown Provider';
+        document.getElementById('source-detail-ip').textContent = sourceIp;
+        
+        const location = [data.city, data.country_name].filter(Boolean).join(', ') || 'Unknown location';
+        document.getElementById('source-detail-location').textContent = location;
+        document.getElementById('source-detail-asn').textContent = data.asn ? `ASN ${data.asn}` : 'No ASN';
+        
+        /* Inject icons and stats grid */
+        const totals = data.totals || {};
+        const statsContainer = document.getElementById('source-details-stats-container');
+        if (statsContainer) {
+            statsContainer.innerHTML = generateDetailStatsGrid(totals);
+        }
+        
+        const envelopes = data.envelope_from_groups || [];
+        const envelopeList = document.getElementById('source-detail-envelope-list');
+        
+        if (envelopes.length === 0) {
+            envelopeList.innerHTML = '<p class="text-center py-12 text-gray-500">No data found.</p>';
+            return;
+        }
+        
+        envelopeList.innerHTML = `
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">From: domain</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Envelope from: domain</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Volume</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">DMARC pass</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">SPF aligned</th>
+                        <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">DKIM aligned</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reporter</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                    ${envelopes.map(env => {
+                        const dmarcPct = env.volume > 0 ? Math.round((env.dmarc_pass / env.volume) * 100) : 0;
+                        const spfPct = env.volume > 0 ? Math.round((env.spf_aligned / env.volume) * 100) : 0;
+                        const dkimPct = env.volume > 0 ? Math.round((env.dkim_aligned / env.volume) * 100) : 0;
+                        const dmarcColor = dmarcPct >= 95 ? 'text-green-600 dark:text-green-400' : dmarcPct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        const spfColor = spfPct >= 95 ? 'text-green-600 dark:text-green-400' : spfPct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        const dkimColor = dkimPct >= 95 ? 'text-green-600 dark:text-green-400' : dkimPct === 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100';
+                        
+                        return `
+                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(env.header_from || '-')}</td>
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(env.envelope_from || '-')}</td>
+                            <td class="px-6 py-4 text-sm text-right text-gray-900 dark:text-gray-100">${(env.volume || 0).toLocaleString()}</td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm font-medium ${dmarcColor}">${dmarcPct}%</span></td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm ${spfColor}">${spfPct}%</span></td>
+                            <td class="px-6 py-4 text-right"><span class="text-sm ${dkimColor}">${dkimPct}%</span></td>
+                            <td class="px-6 py-4 text-sm text-gray-900 dark:text-gray-100">${escapeHtml(env.reporter || '-')}</td>
+                        </tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (error) {
+        console.error('Error loading source details:', error);
+    }
+}
+
+
+function generateDetailStatsGrid(totals) {
+    return `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">Volume</h3>
+                    <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+                </div>
+                <div class="text-2xl font-bold text-gray-900 dark:text-white">${(totals.total_messages || 0).toLocaleString()}</div>
+            </div>
+
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">DMARC Pass</h3>
+                    <svg class="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                </div>
+                <div class="text-2xl font-bold text-gray-900 dark:text-white">${(totals.dmarc_pass || 0).toLocaleString()}</div>
+                <div class="text-xs text-green-600 dark:text-green-400 mt-1">${totals.dmarc_pass_pct || 0}%</div>
+            </div>
+
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">SPF Aligned</h3>
+                    <svg class="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </div>
+                <div class="text-2xl font-bold text-gray-900 dark:text-white">${(totals.spf_pass || 0).toLocaleString()}</div>
+                <div class="text-xs text-orange-500 mt-1">${totals.spf_pass_pct || 0}%</div>
+            </div>
+
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-100 dark:border-gray-700">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400">DKIM Aligned</h3>
+                    <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+                </div>
+                <div class="text-2xl font-bold text-gray-900 dark:text-white">${(totals.dkim_pass || 0).toLocaleString()}</div>
+                <div class="text-xs text-purple-500 mt-1">${totals.dkim_pass_pct || 0}%</div>
+            </div>
+        </div>
+    `;
+}
+
+
+// =============================================================================
+// NAVIGATION
+// =============================================================================
+
+function dmarcGoBack() {
+    if (dmarcState.currentView === 'source_details' || dmarcState.currentView === 'report_details') {
+        dmarcState.currentView = 'overview';
+        dmarcState.currentReportDate = null;
+        dmarcState.currentSourceIp = null;
+        
+        document.getElementById('dmarc-report-details-view').classList.add('hidden');
+        document.getElementById('dmarc-source-details-view').classList.add('hidden');
+        document.getElementById('dmarc-overview-view').classList.remove('hidden');
+        document.getElementById('dmarc-page-title').textContent = dmarcState.currentDomain;
+        
+        if (dmarcState.currentSubTab === 'reports') {
+            loadDomainReports(dmarcState.currentDomain);
+        } else {
+            loadDomainSources(dmarcState.currentDomain);
+        }
+        
+        return;
+    }
+    
+    dmarcState.currentView = 'domains';
+    dmarcState.currentDomain = null;
+    
+    if (dmarcState.chartInstance) {
+        dmarcState.chartInstance.destroy();
+        dmarcState.chartInstance = null;
+    }
+    
+    document.getElementById('dmarc-overview-view').classList.add('hidden');
+    document.getElementById('dmarc-report-details-view').classList.add('hidden');
+    document.getElementById('dmarc-source-details-view').classList.add('hidden');
+    document.getElementById('dmarc-domains-view').classList.remove('hidden');
+    document.getElementById('dmarc-back-btn').classList.add('hidden');
+    document.getElementById('dmarc-page-title').textContent = 'DMARC Reports';
+    // document.getElementById('dmarc-breadcrumb').textContent = 'Domains';
+    
+    loadDmarcDomains();
+}
+
+function dmarcSwitchSubTab(tab) {
+    dmarcState.currentSubTab = tab;
+    
+    // Update tab buttons
+    document.querySelectorAll('[id^="dmarc-subtab-"]').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    document.getElementById(`dmarc-subtab-${tab}`).classList.add('active');
+    
+    // Update content
+    if (tab === 'reports') {
+        document.getElementById('dmarc-reports-content').classList.remove('hidden');
+        document.getElementById('dmarc-sources-content').classList.add('hidden');
+    } else if (tab === 'sources') {
+        document.getElementById('dmarc-reports-content').classList.add('hidden');
+        document.getElementById('dmarc-sources-content').classList.remove('hidden');
+        
+        // Load sources if not loaded yet
+        if (dmarcState.currentDomain) {
+            loadDomainSources(dmarcState.currentDomain);
+        }
+    }
+}
+
+// =============================================================================
+// UPLOAD
+// =============================================================================
+
+async function uploadDmarcReport(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        const response = await authenticatedFetch('/api/dmarc/upload', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (response.status === 403) {
+            showToast('Manual upload is disabled', 'error');
+            event.target.value = '';
+            return;
+        }
+        
+        if (!response.ok) throw new Error('Upload failed');
+        
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            showToast(`Report uploaded: ${result.records_count} records`, 'success');
+            if (dmarcState.currentView === 'domains') {
+                loadDmarcDomains();
+            } else if (dmarcState.currentDomain) {
+                loadDomainOverview(dmarcState.currentDomain);
+            }
+        } else if (result.status === 'duplicate') {
+            showToast('Report already exists', 'warning');
+        }
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        showToast('Failed to upload report', 'error');
+    }
+    
+    event.target.value = '';
+}
+
+// =============================================================================
+// IMAP
+// =============================================================================
+
+async function loadDmarcImapStatus() {
+    try {
+        const response = await authenticatedFetch('/api/dmarc/imap/status');
+        if (!response.ok) {
+            dmarcImapStatus = null;
+            return;
+        }
+        
+        dmarcImapStatus = await response.json();
+        updateDmarcControls();
+        
+    } catch (error) {
+        console.error('Error loading DMARC IMAP status:', error);
+        dmarcImapStatus = null;
+    }
+}
+
+function updateDmarcControls() {
+    const uploadBtn = document.getElementById('dmarc-upload-btn');
+    const syncContainer = document.getElementById('dmarc-sync-container');
+    const lastSyncInfo = document.getElementById('dmarc-last-sync-info');
+    
+    // Toggle manual upload button
+    if (uploadBtn) {
+        if (dmarcImapStatus && dmarcImapStatus.manual_upload_enabled === true) {
+            uploadBtn.classList.remove('hidden');
+        } else {
+            uploadBtn.classList.add('hidden');
+        }
+    }
+    
+    // Toggle sync container
+    if (dmarcImapStatus && dmarcImapStatus.enabled) {
+        syncContainer.classList.remove('hidden');
+        
+        // Update last sync info to match Domains Overview style
+        if (dmarcImapStatus.latest_sync) {
+            const sync = dmarcImapStatus.latest_sync;
+            const timeStr = formatTime(sync.started_at);
+            
+            let statusPrefix = '';
+            if (sync.status === 'success') statusPrefix = '✓ ';
+            if (sync.status === 'error') statusPrefix = '✗ ';
+            if (sync.status === 'running') statusPrefix = '⟳ ';
+            
+            lastSyncInfo.innerHTML = `
+                <div class="flex flex-col items-center lg:items-end">
+                    <span class="${sync.status === 'error' ? 'text-red-500' : 'text-green-500'} font-medium">
+                        ${statusPrefix}Last sync: ${timeStr}
+                    </span>
+                    <button onclick="showDmarcSyncHistory()" class="text-blue-600 dark:text-blue-400 hover:underline text-[11px] mt-0.5">
+                        View History
+                    </button>
+                </div>
+            `;
+        } else {
+            lastSyncInfo.innerHTML = '<span class="text-gray-500 italic">Never synced</span>';
+        }
+    } else {
+        syncContainer.classList.add('hidden');
+    }
+}
+
+async function triggerDmarcSync() {
+    const btn = document.getElementById('dmarc-sync-btn');
+    const btnText = document.getElementById('dmarc-sync-btn-text');
+    
+    if (!dmarcImapStatus || !dmarcImapStatus.enabled) {
+        showToast('IMAP sync is not enabled', 'error');
+        return;
+    }
+    
+    btn.disabled = true;
+    btnText.textContent = 'Syncing...';
+    
+    try {
+        const response = await authenticatedFetch('/api/dmarc/imap/sync', {
+            method: 'POST'
+        });
+        
+        const result = await response.json();
+        
+        if (result.status === 'already_running') {
+            showToast('Sync is already in progress', 'info');
+        } else if (result.status === 'started') {
+            showToast('IMAP sync started', 'success');
+            
+            // Immediate UI update to show "Running" state
+            await loadDmarcImapStatus(); 
+            
+            // Delayed update to catch the final result (success/fail)
+            setTimeout(async () => {
+                await loadDmarcImapStatus();
+                await loadDmarcDomains();
+            }, 5000); // Increased to 5s to give the sync time to work
+        }
+        
+    } catch (error) {
+        console.error('Error triggering sync:', error);
+        showToast('Failed to start sync', 'error');
+    } finally {
+        btn.disabled = false;
+        btnText.textContent = 'Sync from IMAP';
+    }
+}
+
+
+async function showDmarcSyncHistory() {
+    const modal = document.getElementById('dmarc-sync-history-modal');
+    const content = document.getElementById('dmarc-sync-history-content');
+    
+    modal.classList.remove('hidden');
+    
+    const closeOnBackdrop = (e) => {
+        if (e.target === modal) {
+            closeDmarcSyncHistoryModal();
+            modal.removeEventListener('click', closeOnBackdrop);
+        }
+    };
+    modal.addEventListener('click', closeOnBackdrop);
+    
+    try {
+        const response = await authenticatedFetch('/api/dmarc/imap/history?limit=20');
+        const data = await response.json();
+        
+        if (data.data.length === 0) {
+            content.innerHTML = '<p class="text-center py-12 text-gray-500">No sync history yet</p>';
+            return;
+        }
+        
+        content.innerHTML = `
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead class="bg-gray-50 dark:bg-gray-700">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Emails</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Created</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Duplicate</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Failed</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Duration</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                        ${data.data.map(sync => {
+                            const statusClass = sync.status === 'success' ? 'text-green-600' : 
+                                              sync.status === 'error' ? 'text-red-600' : 'text-blue-600';
+                            const date = formatDate(sync.started_at);
+                            const duration = sync.duration_seconds ? `${Math.round(sync.duration_seconds)}s` : '-';
+                            
+                            return `
+                                <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                                    <td class="px-6 py-4 text-sm text-gray-900 dark:text-white">${date}</td>
+                                    <td class="px-6 py-4 text-sm">
+                                        <span class="px-2 py-1 rounded text-xs ${sync.sync_type === 'manual' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'}">
+                                            ${sync.sync_type}
+                                        </span>
+                                    </td>
+                                    <td class="px-6 py-4 text-sm font-medium ${statusClass}">${sync.status}</td>
+                                    <td class="px-6 py-4 text-sm text-right text-gray-900 dark:text-white">${sync.emails_found || 0}</td>
+                                    <td class="px-6 py-4 text-sm text-right text-green-600">${sync.reports_created || 0}</td>
+                                    <td class="px-6 py-4 text-sm text-right text-gray-500">${sync.reports_duplicate || 0}</td>
+                                    <td class="px-6 py-4 text-sm text-right ${sync.reports_failed > 0 ? 'text-red-600' : 'text-gray-900 dark:text-white'}">${sync.reports_failed || 0}</td>
+                                    <td class="px-6 py-4 text-sm text-gray-900 dark:text-white">${duration}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+        
+    } catch (error) {
+        console.error('Error loading sync history:', error);
+        content.innerHTML = '<p class="text-center py-12 text-red-500">Failed to load sync history</p>';
+    }
+}
+
+function closeDmarcSyncHistoryModal() {
+    document.getElementById('dmarc-sync-history-modal').classList.add('hidden');
+}
+
+// =============================================================================
+// TEST IMAP / SMTP
+// =============================================================================
+
+async function testSmtpConnection() {
+    showConnectionTestModal('SMTP Connection Test', 'Testing SMTP connection...');
+    
+    try {
+        const response = await authenticatedFetch('/api/settings/test/smtp', {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        // Ensure logs is an array
+        const logs = result.logs || ['No logs available'];
+        updateConnectionTestModal(result.success ? 'success' : 'error', logs);
+        
+    } catch (error) {
+        updateConnectionTestModal('error', [
+            'Failed to test SMTP connection',
+            `Error: ${error.message}`
+        ]);
+    }
+}
+
+async function testImapConnection() {
+    showConnectionTestModal('IMAP Connection Test', 'Testing IMAP connection...');
+    
+    try {
+        const response = await authenticatedFetch('/api/settings/test/imap', {
+            method: 'POST'
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const result = await response.json();
+        
+        // Ensure logs is an array
+        const logs = result.logs || ['No logs available'];
+        updateConnectionTestModal(result.success ? 'success' : 'error', logs);
+        
+    } catch (error) {
+        updateConnectionTestModal('error', [
+            'Failed to test IMAP connection',
+            `Error: ${error.message}`
+        ]);
+    }
+}
+
+function showConnectionTestModal(title, message) {
+    const modal = document.createElement('div');
+    modal.id = 'connection-test-modal';
+    modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+    modal.innerHTML = `
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${escapeHtml(title)}</h3>
+                <button onclick="closeConnectionTestModal()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-4 overflow-y-auto flex-1">
+                <div id="connection-test-content" class="space-y-2">
+                    <div class="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                        <div class="loading"></div>
+                        <span>${escapeHtml(message)}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="p-4 border-t border-gray-200 dark:border-gray-700 flex justify-end">
+                <button onclick="closeConnectionTestModal()" class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded transition-colors">
+                    Close
+                </button>
+            </div>
+        </div>
+    `;
+    
+    // Close on backdrop click
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            closeConnectionTestModal();
+        }
+    });
+    
+    document.body.appendChild(modal);
+}
+
+function updateConnectionTestModal(status, logs) {
+    const content = document.getElementById('connection-test-content');
+    if (!content) return;
+    
+    // Ensure logs is an array
+    if (!Array.isArray(logs)) {
+        logs = ['Error: Invalid response format'];
+    }
+    
+    const statusColor = status === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+    const statusIcon = status === 'success' ? 
+        '<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>' :
+        '<svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path></svg>';
+    
+    content.innerHTML = `
+        <div class="flex items-center gap-3 mb-4 p-3 rounded ${status === 'success' ? 'bg-green-50 dark:bg-green-900/20' : 'bg-red-50 dark:bg-red-900/20'}">
+            <div class="${statusColor}">
+                ${statusIcon}
+            </div>
+            <span class="font-semibold ${statusColor}">
+                ${status === 'success' ? 'Connection Successful' : 'Connection Failed'}
+            </span>
+        </div>
+        <div class="bg-gray-900 text-gray-100 p-4 rounded font-mono text-xs overflow-x-auto">
+            ${logs.map(log => {
+                let color = 'text-gray-300';
+                if (log.includes('✓')) color = 'text-green-400';
+                if (log.includes('✗') || log.includes('ERROR')) color = 'text-red-400';
+                if (log.includes('WARNING')) color = 'text-yellow-400';
+                return `<div class="${color}">${escapeHtml(log)}</div>`;
+            }).join('')}
+        </div>
+    `;
+}
+
+function closeConnectionTestModal() {
+    const modal = document.getElementById('connection-test-modal');
+    if (modal) {
+        modal.remove();
+    }
+}
+
+// =============================================================================
+// HELP DOCUMENTATION MODAL
+// =============================================================================
+
+async function showHelpModal(docName) {
+    try {
+        const response = await authenticatedFetch(`/api/docs/${docName}`);
+        
+        if (!response.ok) {
+            throw new Error(`Failed to load documentation: ${response.statusText}`);
+        }
+        
+        const markdown = await response.text();
+        
+        let htmlContent = markdown;
+        if (typeof marked !== 'undefined') {
+            marked.setOptions({
+                breaks: true,
+                gfm: true
+            });
+            htmlContent = marked.parse(markdown);
+        }
+        
+        const modal = document.getElementById('changelog-modal');
+        const modalTitle = modal?.querySelector('h3');
+        const content = document.getElementById('changelog-content');
+        
+        if (modal && content) {
+            if (modalTitle) {
+                modalTitle.textContent = `Help - ${docName}`;
+            }
+            
+            content.innerHTML = htmlContent;
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+    } catch (error) {
+        console.error('Failed to load help documentation:', error);
+        
+        const modal = document.getElementById('changelog-modal');
+        const modalTitle = modal?.querySelector('h3');
+        const content = document.getElementById('changelog-content');
+        
+        if (modal && content) {
+            if (modalTitle) {
+                modalTitle.textContent = 'Help';
+            }
+            content.innerHTML = '<p class="text-red-500">Failed to load help documentation. Please try again later.</p>';
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+    }
 }
 
 // =============================================================================

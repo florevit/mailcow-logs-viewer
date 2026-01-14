@@ -23,7 +23,10 @@ This document describes all available API endpoints for the Mailcow Logs Viewer 
 8. [Statistics](#statistics)
 9. [Status](#status)
 10. [Settings](#settings)
+    - [SMTP & IMAP Test](#smtp--imap-test)
 11. [Export](#export)
+12. [DMARC](#dmarc)
+    - [DMARC IMAP Auto-Import](#dmarc-imap-auto-import)
 
 ---
 
@@ -82,7 +85,7 @@ Health check endpoint for monitoring and load balancers.
 {
   "status": "healthy",
   "database": "connected",
-  "version": "1.4.9",
+  "version": "1.5.0",
   "config": {
     "fetch_interval": 60,
     "retention_days": 7,
@@ -103,7 +106,7 @@ Application information and configuration.
 ```json
 {
   "name": "Mailcow Logs Viewer",
-  "version": "1.4.9",
+  "version": "1.5.0",
   "mailcow_url": "https://mail.example.com",
   "local_domains": ["example.com", "mail.example.com"],
   "fetch_interval": 60,
@@ -134,7 +137,8 @@ job_status = {
     'expire_correlations': {'last_run': datetime, 'status': str, 'error': str|None},
     'cleanup_logs': {'last_run': datetime, 'status': str, 'error': str|None},
     'check_app_version': {'last_run': datetime, 'status': str, 'error': str|None},
-    'dns_check': {'last_run': datetime, 'status': str, 'error': str|None}
+    'dns_check': {'last_run': datetime, 'status': str, 'error': str|None},
+    'update_geoip': {'last_run': datetime, 'status': str, 'error': str|None}
 }
 ```
 
@@ -166,6 +170,7 @@ Job status is accessible through:
 | **Cleanup Logs** | Daily at 2 AM | Removes logs older than retention period |
 | **Check App Version** | 6 hours | Checks GitHub for application updates |
 | **DNS Check** | 6 hours | Validates DNS records (SPF, DKIM, DMARC) for all active domains |
+| **Update GeoIP** | Weekly (Sunday 3 AM) | Updates MaxMind GeoIP databases for DMARC source IP enrichment |
 
 ### Implementation Details
 
@@ -233,12 +238,13 @@ Get list of all domains with statistics and cached DNS validation results.
       "dns_checks": {
         "spf": {
           "status": "success",
-          "message": "SPF configured correctly with strict -all policy",
+          "message": "SPF configured correctly with strict -all policy. Server IP authorized via ip4:1.2.3.4",
           "record": "v=spf1 mx include:_spf.google.com -all",
           "has_strict_all": true,
           "includes_mx": true,
           "includes": ["_spf.google.com"],
-          "warnings": []
+          "warnings": [],
+          "dns_lookups": 3
         },
         "dkim": {
           "status": "success",
@@ -247,7 +253,14 @@ Get list of all domains with statistics and cached DNS validation results.
           "dkim_domain": "dkim._domainkey.example.com",
           "expected_record": "v=DKIM1;k=rsa;p=MIIBIjANBg...",
           "actual_record": "v=DKIM1;k=rsa;p=MIIBIjANBg...",
-          "match": true
+          "match": true,
+          "warnings": [],
+          "info": [],
+          "parameters": {
+            "v": "DKIM1",
+            "k": "rsa",
+            "p": "MIIBIjANBg..."
+          }
         },
         "dmarc": {
           "status": "success",
@@ -298,17 +311,37 @@ Get list of all domains with statistics and cached DNS validation results.
 - `unknown`: Check not yet performed
 
 **SPF Status Indicators:**
+- **DNS Lookup Limit**: Error if >10 lookups (RFC 7208)
+- **Server IP Authorization**: Error if mail server IP not found in SPF
+- **Multiple Records**: Error (only one SPF record allowed per domain)
+- **Invalid Syntax**: Error (must start with `v=spf1 ` with space)
+- **Invalid Mechanisms**: Error (only valid mechanisms allowed)
 - `-all`: Strict policy (status: success)
-- `~all`: Soft fail (status: warning) - Consider using -all for stricter policy
+- `~all`: Soft fail (status: success, informational)
 - `?all`: Neutral (status: warning) - Provides minimal protection
 - `+all`: Pass all (status: error) - Provides no protection
 - Missing `all`: No policy defined (status: error)
+
+**New SPF Fields:**
+- `dns_lookups`: Integer count of DNS lookups (0-999)
+- `warnings`: Array of warning messages
 
 **DKIM Validation:**
 - Fetches expected DKIM record from Mailcow API
 - Queries DNS for actual DKIM record
 - Compares expected vs actual records
 - `match`: Boolean indicating if records match
+- **Parameter Validation**: Checks for security issues
+  - `t=y` (Testing mode): Critical error
+  - `t=s` (Strict subdomain): Informational only
+  - `h=sha1` (Weak hash): Warning
+  - `p=` (Empty key): Error - key revoked
+  - Unknown key types: Warning
+
+**New DKIM Fields:**
+- `warnings`: Array of security warnings (with icons: ❌ ⚠️)
+- `info`: Array of informational messages (plain text)
+- `parameters`: Dictionary of parsed DKIM tags (v, k, t, h, p, etc.)
 
 **DMARC Policy Types:**
 - `reject`: Strict policy (status: success)
@@ -395,12 +428,13 @@ POST /api/domains/example.com/check-dns
     "domain": "example.com",
     "spf": {
       "status": "success",
-      "message": "SPF configured correctly with strict -all policy",
+      "message": "SPF configured correctly with strict -all policy. Server IP authorized via ip4:1.2.3.4",
       "record": "v=spf1 mx include:_spf.google.com -all",
       "has_strict_all": true,
       "includes_mx": true,
       "includes": ["_spf.google.com"],
-      "warnings": []
+      "warnings": [],
+      "dns_lookups": 3
     },
     "dkim": {
       "status": "success",
@@ -409,7 +443,14 @@ POST /api/domains/example.com/check-dns
       "dkim_domain": "dkim._domainkey.example.com",
       "expected_record": "v=DKIM1;k=rsa;p=MIIBIjANBg...",
       "actual_record": "v=DKIM1;k=rsa;p=MIIBIjANBg...",
-      "match": true
+      "match": true,
+      "warnings": [],
+      "info": [],
+      "parameters": {
+        "v": "DKIM1",
+        "k": "rsa",
+        "p": "MIIBIjANBg..."
+      }
     },
     "dmarc": {
       "status": "success",
@@ -442,15 +483,51 @@ POST /api/domains/example.com/check-dns
 
 **SPF Validation:**
 - Queries TXT records for SPF (`v=spf1`)
+- Validates syntax and structure:
+  - Checks for multiple SPF records (RFC violation)
+  - Validates `v=spf1` with space after
+  - Checks for valid mechanisms only (ip4, ip6, a, mx, include, exists, all)
+  - Validates presence of `all` mechanism
 - Detects policy: `-all`, `~all`, `?all`, `+all`, or missing
 - Checks for `mx` mechanism
 - Extracts `include:` directives
-- Provides policy-specific warnings
+- **DNS Lookup Counter** (RFC 7208 compliance):
+  - Recursively counts DNS lookups through includes
+  - Counts `a`, `mx`, `exists:`, `redirect=`, and `include:` mechanisms
+  - Maximum 10 lookups enforced (returns error if exceeded)
+  - Returns `dns_lookups` field with count
+- **Server IP Authorization**:
+  - Fetches server IP from Mailcow API once on startup
+  - Verifies server IP is authorized via:
+    - Direct `ip4:` match (including CIDR ranges)
+    - `a` record resolution
+    - `mx` record resolution
+    - Recursive `include:` checking (up to 10 levels)
+  - Returns authorization method in message (e.g., "Server IP authorized via ip4:X.X.X.X")
+  - Returns error if server IP not found in SPF record
+- Provides policy-specific warnings and recommendations
 
 **DKIM Validation:**
 - Fetches expected DKIM value from Mailcow API (`/api/v1/get/dkim/{domain}`)
 - Queries DNS at `{selector}._domainkey.{domain}`
 - Compares expected vs actual records (whitespace-normalized)
+- **Parameter Validation**:
+  - Parses all DKIM tags (v, k, t, h, p, etc.)
+  - **Testing Mode Detection** (`t=y`): Returns critical error
+    - Warning: "Emails will pass validation even with invalid signatures"
+    - Never use in production
+  - **Strict Subdomain Mode** (`t=s`): Returns informational message
+    - Only main domain can send, subdomains will fail DKIM
+    - Does NOT affect validation status (remains "success")
+  - **Revoked Key Detection** (`p=` empty): Returns error
+    - Indicates DKIM has been intentionally disabled
+  - **Weak Hash Algorithm** (`h=sha1`): Returns warning
+    - Recommends upgrade to SHA256
+  - **Key Type Validation** (`k=`): Validates rsa or ed25519
+- Returns three arrays:
+  - `warnings`: Security issues (errors and warnings with icons)
+  - `info`: Informational messages (plain text, no status impact)
+  - `parameters`: Parsed DKIM parameter dictionary
 - Reports mismatch details
 
 **DMARC Validation:**
@@ -471,6 +548,191 @@ POST /api/domains/example.com/check-dns
 - Indexed on `domain_name` and `checked_at` for performance
 - Upsert pattern (update if exists, insert if new)
 - `is_full_check` flag distinguishes check types
+
+---
+
+### DNS Validation Examples
+
+#### SPF Examples
+
+**Example 1: Too Many DNS Lookups**
+```json
+{
+  "status": "error",
+  "message": "SPF has too many DNS lookups (11). Maximum is 10",
+  "record": "v=spf1 include:_spf.exmail.email -all",
+  "has_strict_all": true,
+  "includes_mx": false,
+  "includes": ["_spf.exmail.email"],
+  "warnings": [
+    "SPF record exceeds the 10 DNS lookup limit with 11 lookups",
+    "This will cause SPF validation to fail"
+  ],
+  "dns_lookups": 11
+}
+```
+
+**Example 2: Server IP Not Authorized**
+```json
+{
+  "status": "error",
+  "message": "Server IP 1.2.3.4 is NOT authorized in SPF record",
+  "record": "v=spf1 ip4:1.2.3.4 -all",
+  "has_strict_all": true,
+  "includes_mx": false,
+  "includes": [],
+  "warnings": [
+    "Mail server IP not found in SPF record"
+  ],
+  "dns_lookups": 0
+}
+```
+
+**Example 3: Multiple SPF Records**
+```json
+{
+  "status": "error",
+  "message": "Multiple SPF records found (2). Only one is allowed",
+  "record": "v=spf1 mx -all; v=spf1 ip4:1.2.3.4 -all",
+  "has_strict_all": false,
+  "includes_mx": false,
+  "includes": [],
+  "warnings": [
+    "Multiple SPF records invalidate ALL records"
+  ]
+}
+```
+
+**Example 4: Success with Server IP Authorization**
+```json
+{
+  "status": "success",
+  "message": "SPF configured correctly with strict -all policy. Server IP authorized via include:_spf.google.com (ip4:1.2.3.4)",
+  "record": "v=spf1 include:_spf.google.com -all",
+  "has_strict_all": true,
+  "includes_mx": false,
+  "includes": ["_spf.google.com"],
+  "warnings": [],
+  "dns_lookups": 3
+}
+```
+
+#### DKIM Examples
+
+**Example 1: Testing Mode (Critical)**
+```json
+{
+  "status": "error",
+  "message": "DKIM is in TESTING mode (t=y) - Emails will pass validation even with invalid signatures. Remove t=y for production!",
+  "selector": "dkim",
+  "dkim_domain": "dkim._domainkey.example.com",
+  "expected_record": "v=DKIM1;k=rsa;t=y;p=MIIBIjANBg...",
+  "actual_record": "v=DKIM1;k=rsa;t=y;p=MIIBIjANBg...",
+  "match": true,
+  "warnings": [],
+  "info": [],
+  "parameters": {
+    "v": "DKIM1",
+    "k": "rsa",
+    "t": "y",
+    "p": "MIIBIjANBg..."
+  }
+}
+```
+
+**Example 2: Strict Subdomain Mode (Informational)**
+```json
+{
+  "status": "success",
+  "message": "DKIM configured correctly",
+  "selector": "dkim",
+  "dkim_domain": "dkim._domainkey.example.com",
+  "expected_record": "v=DKIM1;k=rsa;t=s;p=MIIBIjANBg...",
+  "actual_record": "v=DKIM1;k=rsa;t=s;p=MIIBIjANBg...",
+  "match": true,
+  "warnings": [],
+  "info": [
+    "DKIM uses strict subdomain mode (t=s)"
+  ],
+  "parameters": {
+    "v": "DKIM1",
+    "k": "rsa",
+    "t": "s",
+    "p": "MIIBIjANBg..."
+  }
+}
+```
+
+**Example 3: SHA1 Warning**
+```json
+{
+  "status": "warning",
+  "message": "DKIM configured but has warnings",
+  "selector": "dkim",
+  "dkim_domain": "dkim._domainkey.example.com",
+  "expected_record": "v=DKIM1;k=rsa;h=sha1;p=MIIBIjANBg...",
+  "actual_record": "v=DKIM1;k=rsa;h=sha1;p=MIIBIjANBg...",
+  "match": true,
+  "warnings": [
+    "⚠️ DKIM uses SHA1 hash algorithm (h=sha1)"
+  ],
+  "info": [],
+  "parameters": {
+    "v": "DKIM1",
+    "k": "rsa",
+    "h": "sha1",
+    "p": "MIIBIjANBg..."
+  }
+}
+```
+
+**Example 4: Revoked Key**
+```json
+{
+  "status": "error",
+  "message": "DKIM key is revoked (p= is empty)",
+  "selector": "dkim",
+  "dkim_domain": "dkim._domainkey.example.com",
+  "expected_record": "v=DKIM1;k=rsa;p=",
+  "actual_record": "v=DKIM1;k=rsa;p=",
+  "match": true,
+  "warnings": [
+    "❌ DKIM key is revoked (p= is empty)"
+  ],
+  "info": [],
+  "parameters": {
+    "v": "DKIM1",
+    "k": "rsa",
+    "p": ""
+  }
+}
+```
+
+**Example 5: Multiple Issues**
+```json
+{
+  "status": "warning",
+  "message": "DKIM configured but has warnings",
+  "selector": "dkim",
+  "dkim_domain": "dkim._domainkey.example.com",
+  "expected_record": "v=DKIM1;k=rsa;t=s;h=sha1;p=MIIBIjANBg...",
+  "actual_record": "v=DKIM1;k=rsa;t=s;h=sha1;p=MIIBIjANBg...",
+  "match": true,
+  "warnings": [
+    "⚠️ DKIM uses SHA1 hash algorithm (h=sha1)"
+  ],
+  "info": [
+    "DKIM uses strict subdomain mode (t=s)"
+  ],
+  "parameters": {
+    "v": "DKIM1",
+    "k": "rsa",
+    "t": "s",
+    "h": "sha1",
+    "p": "MIIBIjANBg..."
+  }
+}
+```
 
 ---
 
@@ -1222,7 +1484,12 @@ Get system configuration and status information.
     "csv_export_limit": 10000,
     "scheduler_workers": 4,
     "auth_enabled": false,
-    "auth_username": null
+    "auth_username": null,
+    "maxmind_status": {
+      "configured": true,
+      "valid": true,
+      "error": null
+    }
   },
   "import_status": {
     "postfix": {
@@ -1306,6 +1573,13 @@ Get system configuration and status information.
       "status": "success",
       "last_run": "2026-01-08T08:00:00Z",
       "error": null
+    },
+    "update_geoip": {
+      "schedule": "Weekly (Sunday 3 AM)",
+      "description": "Updates MaxMind GeoIP databases for DMARC source IP enrichment",
+      "status": "success",
+      "last_run": "2026-01-05T03:00:00Z",
+      "error": null
     }
   },
   "recent_incomplete_correlations": [
@@ -1351,6 +1625,7 @@ Each background job reports real-time execution status:
 5. **cleanup_logs**: Removes logs older than retention period (runs daily at 2 AM)
 6. **check_app_version**: Checks GitHub for application updates every 6 hours
 7. **dns_check**: Validates DNS records (SPF, DKIM, DMARC) for all active domains every 6 hours
+8. **update_geoip**: Updates MaxMind GeoLite2 databases (City + ASN) for DMARC source IP enrichment (runs weekly on Sunday at 3 AM)
 
 ---
 
@@ -1376,6 +1651,129 @@ Detailed health check with timing information.
   }
 }
 ```
+
+---
+
+## SMTP & IMAP Test
+
+### POST /api/settings/test/smtp
+
+Test SMTP connection with detailed logging for diagnostics.
+
+**Request:** No body required
+
+**Response:**
+```json
+{
+  "success": true,
+  "logs": [
+    "Starting SMTP connection test...",
+    "Host: mail.example.com",
+    "Port: 587",
+    "Use TLS: true",
+    "User: noreply@example.com",
+    "Connecting to SMTP server...",
+    "Connected",
+    "Starting TLS...",
+    "TLS established",
+    "Logging in...",
+    "Login successful",
+    "Sending test email...",
+    "Test email sent successfully",
+    "Connection closed",
+    "✓ SMTP test completed successfully"
+  ]
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "logs": [
+    "Starting SMTP connection test...",
+    "Host: mail.example.com",
+    "Port: 587",
+    "Connecting to SMTP server...",
+    "✗ Authentication failed: (535, b'5.7.8 Error: authentication failed')"
+  ]
+}
+```
+
+**Response Fields:**
+- `success`: Boolean indicating if test passed
+- `logs`: Array of log messages showing connection attempt details
+
+**Notes:**
+- Sends actual test email to configured admin email address
+- Tests full connection flow: connect → TLS → authenticate → send
+- Useful for diagnosing SMTP configuration issues
+- Returns detailed error messages on failure
+
+---
+
+### POST /api/settings/test/imap
+
+Test IMAP connection with detailed logging for diagnostics.
+
+**Request:** No body required
+
+**Response:**
+```json
+{
+  "success": true,
+  "logs": [
+    "Starting IMAP connection test...",
+    "Host: mail.example.com",
+    "Port: 993",
+    "Use SSL: true",
+    "User: dmarc@example.com",
+    "Folder: INBOX",
+    "Connecting to IMAP server...",
+    "Connected using SSL",
+    "Logging in...",
+    "Login successful",
+    "Listing mailboxes...",
+    "Found 5 mailboxes:",
+    "  - \"INBOX\"",
+    "  - \"Sent\"",
+    "  - \"Drafts\"",
+    "  - \"Spam\"",
+    "  - \"Trash\"",
+    "Selecting folder: INBOX",
+    "Folder selected: 42 messages",
+    "Searching for emails...",
+    "Found 42 emails in folder",
+    "Connection closed",
+    "✓ IMAP test completed successfully"
+  ]
+}
+```
+
+**Error Response:**
+```json
+{
+  "success": false,
+  "logs": [
+    "Starting IMAP connection test...",
+    "Host: mail.example.com",
+    "Port: 993",
+    "Connecting to IMAP server...",
+    "✗ IMAP error: [AUTHENTICATIONFAILED] Authentication failed."
+  ]
+}
+```
+
+**Response Fields:**
+- `success`: Boolean indicating if test passed
+- `logs`: Array of log messages showing connection attempt details
+
+**Notes:**
+- Tests full connection flow: connect → authenticate → list folders → select folder
+- Shows available mailboxes and message count
+- Useful for diagnosing IMAP configuration issues
+- Does not modify or process any emails
+- Returns detailed error messages on failure
 
 ---
 
@@ -1466,6 +1864,644 @@ Export Messages (correlations) to CSV file.
 **Response:** CSV file download
 
 **Columns:** Time, Sender, Recipient, Subject, Direction, Status, Queue ID, Message ID, Spam Score, Is Spam, User, IP, Is Complete
+
+---
+
+## DMARC
+
+### Overview
+
+The DMARC module provides comprehensive email authentication monitoring through DMARC (Domain-based Message Authentication, Reporting & Conformance) aggregate reports. It includes automatic report parsing, GeoIP enrichment for source IPs, and detailed analytics.
+
+**Features:**
+- Automatic DMARC report parsing (XML, GZ, ZIP formats)
+- GeoIP enrichment (country, city, ISP/ASN) via MaxMind databases
+- Domain-centric view with daily aggregation
+- Source IP analysis with authentication results
+- Historical trending and compliance monitoring
+
+---
+
+### GET /api/dmarc/domains
+
+Get list of all domains with DMARC statistics.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | integer | 30 | Number of days to look back (1-365) |
+
+**Response:**
+```json
+{
+  "total_domains": 5,
+  "total_messages": 12458,
+  "total_unique_ips": 142,
+  "overall_dmarc_pass_pct": 97.2,
+  "domains": [
+    {
+      "domain": "example.com",
+      "total_messages": 8234,
+      "unique_ips": 89,
+      "dmarc_pass_pct": 98.5,
+      "spf_pass_pct": 99.1,
+      "dkim_pass_pct": 98.9,
+      "policy_p": "reject",
+      "policy_sp": null,
+      "last_report_date": 1704758400
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `total_domains`: Number of domains with DMARC reports
+- `total_messages`: Total email messages across all domains
+- `total_unique_ips`: Total unique source IPs
+- `overall_dmarc_pass_pct`: Overall DMARC pass rate percentage
+- `domains`: Array of domain statistics
+
+**Domain Object Fields:**
+- `domain`: Domain name
+- `total_messages`: Total messages for this domain
+- `unique_ips`: Number of unique source IPs
+- `dmarc_pass_pct`: Percentage of messages passing both SPF and DKIM
+- `spf_pass_pct`: SPF pass rate
+- `dkim_pass_pct`: DKIM pass rate
+- `policy_p`: Published DMARC policy (none, quarantine, reject)
+- `policy_sp`: Subdomain policy (if different from main policy)
+- `last_report_date`: Unix timestamp of most recent report
+
+---
+
+### GET /api/dmarc/domains/{domain}/overview
+
+Get detailed overview for a specific domain with daily breakdown.
+
+**Path Parameters:**
+- `domain`: Domain name (URL encoded)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | integer | 30 | Number of days to look back (1-365) |
+
+**Response:**
+```json
+{
+  "domain": "example.com",
+  "total_messages": 8234,
+  "unique_ips": 89,
+  "unique_reporters": 12,
+  "dmarc_pass_pct": 98.5,
+  "spf_pass_pct": 99.1,
+  "dkim_pass_pct": 98.9,
+  "policy": {
+    "p": "reject",
+    "sp": null,
+    "adkim": "r",
+    "aspf": "r",
+    "pct": 100,
+    "fo": "0"
+  },
+  "daily_stats": [
+    {
+      "date": 1704758400,
+      "total_messages": 287,
+      "dmarc_pass_pct": 98.3,
+      "spf_pass_pct": 99.0,
+      "dkim_pass_pct": 98.6
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `domain`: Domain name
+- `total_messages`: Total messages in period
+- `unique_ips`: Number of unique source IPs
+- `unique_reporters`: Number of unique organizations sending reports
+- `dmarc_pass_pct`: DMARC pass rate (SPF + DKIM aligned)
+- `spf_pass_pct`: SPF pass rate
+- `dkim_pass_pct`: DKIM pass rate
+- `policy`: Published DMARC policy object
+- `daily_stats`: Array of daily statistics
+
+**Policy Object:**
+- `p`: Domain policy (none, quarantine, reject)
+- `sp`: Subdomain policy
+- `adkim`: DKIM alignment mode (r=relaxed, s=strict)
+- `aspf`: SPF alignment mode (r=relaxed, s=strict)
+- `pct`: Percentage of messages to apply policy to
+- `fo`: Failure reporting options
+
+**Daily Stats Object:**
+- `date`: Unix timestamp (midnight UTC)
+- `total_messages`: Messages for this day
+- `dmarc_pass_pct`: DMARC pass rate
+- `spf_pass_pct`: SPF pass rate
+- `dkim_pass_pct`: DKIM pass rate
+
+---
+
+### GET /api/dmarc/domains/{domain}/reports
+
+Get daily aggregated reports for a specific domain.
+
+**Path Parameters:**
+- `domain`: Domain name (URL encoded)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | integer | 30 | Number of days to look back (1-365) |
+
+**Response:**
+```json
+{
+  "domain": "example.com",
+  "reports": [
+    {
+      "date": 1704758400,
+      "report_count": 12,
+      "unique_ips": 45,
+      "total_messages": 287,
+      "dmarc_pass_pct": 98.3,
+      "spf_pass_pct": 99.0,
+      "dkim_pass_pct": 98.6,
+      "reporters": [
+        "Google",
+        "Microsoft",
+        "Yahoo"
+      ]
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `domain`: Domain name
+- `reports`: Array of daily aggregated reports
+
+**Report Object:**
+- `date`: Unix timestamp (midnight UTC)
+- `report_count`: Number of DMARC reports received for this day
+- `unique_ips`: Number of unique source IPs
+- `total_messages`: Total messages in all reports
+- `dmarc_pass_pct`: DMARC compliance rate
+- `spf_pass_pct`: SPF pass rate
+- `dkim_pass_pct`: DKIM pass rate
+- `reporters`: Array of organizations that sent reports (e.g., "Google", "Microsoft")
+
+---
+
+### GET /api/dmarc/domains/{domain}/sources
+
+Get source IP analysis with GeoIP enrichment.
+
+**Path Parameters:**
+- `domain`: Domain name (URL encoded)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `days` | integer | 30 | Number of days to look back (1-365) |
+
+**Response:**
+```json
+{
+  "domain": "example.com",
+  "sources": [
+    {
+      "source_ip": "8.8.8.8",
+      "total_messages": 1250,
+      "dmarc_pass_pct": 100.0,
+      "spf_pass_pct": 100.0,
+      "dkim_pass_pct": 100.0,
+      "country_code": "US",
+      "country_name": "United States",
+      "country_emoji": "🇺🇸",
+      "city": "Mountain View",
+      "asn": "AS15169",
+      "asn_org": "Google LLC",
+      "first_seen": 1704153600,
+      "last_seen": 1704758400
+    },
+    {
+      "source_ip": "212.199.162.78",
+      "total_messages": 456,
+      "dmarc_pass_pct": 98.2,
+      "spf_pass_pct": 99.1,
+      "dkim_pass_pct": 98.5,
+      "country_code": "IL",
+      "country_name": "Israel",
+      "country_emoji": "🇮🇱",
+      "city": "Tel Aviv",
+      "asn": "AS8551",
+      "asn_org": "Bezeq International Ltd.",
+      "first_seen": 1704240000,
+      "last_seen": 1704758400
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `domain`: Domain name
+- `sources`: Array of source IP objects (ordered by message count, descending)
+
+**Source Object Fields:**
+- `source_ip`: IP address of sending server
+- `total_messages`: Number of messages from this IP
+- `dmarc_pass_pct`: DMARC pass rate for this IP
+- `spf_pass_pct`: SPF pass rate
+- `dkim_pass_pct`: DKIM pass rate
+- `country_code`: ISO 3166-1 alpha-2 country code (e.g., "US", "IL")
+- `country_name`: Full country name
+- `country_emoji`: Flag emoji representation (e.g., 🇺🇸, 🇮🇱)
+- `city`: City name (from MaxMind City database)
+- `asn`: Autonomous System Number (e.g., "AS15169")
+- `asn_org`: ISP/Organization name from ASN database
+- `first_seen`: Unix timestamp of first message from this IP
+- `last_seen`: Unix timestamp of last message from this IP
+
+**GeoIP Notes:**
+- GeoIP fields may be `null` if MaxMind databases are not configured
+- `country_emoji` defaults to 🌍 (globe) when country is unknown
+- GeoIP data requires MaxMind GeoLite2 databases (City + ASN)
+- City accuracy varies by IP (typically accurate to city level for data center IPs)
+- ASN provides ISP/hosting provider information
+
+---
+
+### POST /api/dmarc/upload
+
+Upload and parse a DMARC aggregate report file.
+
+**Content-Type:** `multipart/form-data`
+
+**Form Data:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `file` | file | Yes | DMARC report file (XML, GZ, or ZIP format) |
+
+**Supported File Formats:**
+- `.xml` - Raw XML DMARC report
+- `.gz` - Gzip-compressed XML report (most common)
+- `.zip` - ZIP-compressed XML report (used by Google)
+
+**Request Example:**
+```bash
+curl -X POST http://your-server:8080/api/dmarc/upload \
+  -u username:password \
+  -F "file=@google.com!example.com!1704067200!1704153599.xml.gz"
+```
+
+**Success Response (201 Created):**
+```json
+{
+  "status": "success",
+  "message": "Uploaded report for example.com from Google",
+  "report_id": 123,
+  "records_count": 45
+}
+```
+
+**Duplicate Response (200 OK):**
+```json
+{
+  "status": "duplicate",
+  "message": "Report 12345678901234567890 already exists"
+}
+```
+
+**Error Response (400 Bad Request):**
+```json
+{
+  "detail": "Failed to parse DMARC report"
+}
+```
+
+**Error Response (500 Internal Server Error):**
+```json
+{
+  "detail": "Error message with details"
+}
+```
+
+**Response Fields:**
+
+**Success Response:**
+- `status`: "success"
+- `message`: Human-readable description of uploaded report
+- `report_id`: Database ID of created report
+- `records_count`: Number of source IP records parsed
+
+**Duplicate Response:**
+- `status`: "duplicate"
+- `message`: Indicates report already exists (based on unique report_id from XML)
+
+**Processing Details:**
+1. File is decompressed (if GZ or ZIP)
+2. XML is parsed and validated
+3. Report metadata extracted (domain, org, date range, policy)
+4. Individual records parsed (source IP, counts, auth results)
+5. GeoIP enrichment applied to each source IP (if MaxMind configured)
+6. Data stored in database with proper indexing
+7. Duplicate detection based on unique report_id from XML
+
+**Parsed Data Includes:**
+- Report metadata (report ID, organization, date range)
+- Domain and published DMARC policy
+- Individual source records:
+  - Source IP address
+  - Message count from this source
+  - SPF/DKIM authentication results
+  - Policy evaluation (disposition)
+  - GeoIP enrichment (country, city, ISP/ASN)
+
+**GeoIP Enrichment:**
+- Automatically applied to all source IPs during upload
+- Uses MaxMind GeoLite2 databases (if configured)
+- Gracefully degrades if databases unavailable
+- Enriches with: country, city, ISP, ASN
+
+**File Naming Convention:**
+DMARC report filenames typically follow this pattern:
+```
+<receiver>!<sender-domain>!<begin-timestamp>!<end-timestamp>.<ext>
+```
+Example: `google.com!example.com!1704067200!1704153599.xml.gz`
+
+**Notes:**
+- Reports are identified by unique report_id (from XML)
+- Duplicate uploads are detected and rejected gracefully
+- Large reports (1000+ records) may take a few seconds to process
+- File size limit depends on server configuration (typically 10MB)
+- Malformed XML files are rejected with 400 error
+
+---
+
+## DMARC IMAP Auto-Import
+
+The DMARC module supports automatic import of DMARC reports via IMAP. This allows the system to periodically check a mailbox and automatically process incoming reports without manual uploads.
+
+**Features:**
+- Automatic periodic syncing from IMAP mailbox
+- Configurable sync interval and folder
+- Manual sync trigger via API
+- Comprehensive sync history tracking
+- Email notifications on sync failures
+- Support for SSL/TLS connections
+- Automatic duplicate detection
+
+**Configuration:**
+Set these environment variables to enable IMAP auto-import:
+- `DMARC_IMAP_ENABLED=true`
+- `DMARC_IMAP_HOST=mail.example.com`
+- `DMARC_IMAP_PORT=993`
+- `DMARC_IMAP_USE_SSL=true`
+- `DMARC_IMAP_USER=dmarc@example.com`
+- `DMARC_IMAP_PASSWORD=your-password`
+- `DMARC_IMAP_FOLDER=INBOX`
+- `DMARC_IMAP_INTERVAL=3600` (seconds between syncs)
+- `DMARC_IMAP_DELETE_AFTER=false` (delete processed emails)
+- `DMARC_MANUAL_UPLOAD_ENABLED=true` (allow manual uploads)
+
+---
+
+### GET /api/dmarc/imap/status
+
+Get current IMAP auto-import configuration and last sync information.
+
+**Response:**
+```json
+{
+  "enabled": true,
+  "manual_upload_enabled": true,
+  "host": "mail.example.com",
+  "port": 993,
+  "use_ssl": true,
+  "user": "dmarc@example.com",
+  "folder": "INBOX",
+  "interval_seconds": 3600,
+  "delete_after_processing": false,
+  "last_sync": {
+    "sync_id": 42,
+    "sync_type": "auto",
+    "status": "success",
+    "started_at": "2026-01-12T08:45:20Z",
+    "completed_at": "2026-01-12T08:45:21Z",
+    "emails_found": 5,
+    "emails_processed": 5,
+    "reports_created": 4,
+    "reports_duplicate": 0,
+    "reports_failed": 1,
+    "error_message": null
+  }
+}
+```
+
+**Response Fields:**
+- `enabled`: Whether IMAP auto-import is enabled
+- `manual_upload_enabled`: Whether manual uploads are still allowed
+- `host`: IMAP server hostname
+- `port`: IMAP server port (typically 993 for SSL, 143 for non-SSL)
+- `use_ssl`: Whether SSL/TLS is used
+- `user`: IMAP username/email
+- `folder`: Mailbox folder being monitored (e.g., "INBOX")
+- `interval_seconds`: Seconds between automatic sync runs
+- `delete_after_processing`: Whether emails are deleted after successful processing
+- `last_sync`: Last sync operation details (null if never run)
+
+**Last Sync Object:**
+- `sync_id`: Unique sync operation ID
+- `sync_type`: "auto" (scheduled) or "manual" (API triggered)
+- `status`: "success", "error", or "running"
+- `started_at`: ISO 8601 timestamp with Z suffix
+- `completed_at`: ISO 8601 timestamp with Z suffix (null if running)
+- `emails_found`: Number of DMARC emails found in folder
+- `emails_processed`: Number of emails successfully processed
+- `reports_created`: Number of new DMARC reports created
+- `reports_duplicate`: Number of duplicate reports skipped
+- `reports_failed`: Number of emails that failed processing
+- `error_message`: Error description if sync failed
+
+**Notes:**
+- Sensitive information (password) is never returned
+- Returns 404 if IMAP auto-import is not configured
+- Last sync information persists across restarts
+
+---
+
+### POST /api/dmarc/imap/sync
+
+Manually trigger IMAP sync operation.
+
+**Request:** No body required
+
+**Response:**
+```json
+{
+  "sync_id": 43,
+  "sync_type": "manual",
+  "status": "success",
+  "started_at": "2026-01-12T10:30:00Z",
+  "completed_at": "2026-01-12T10:30:05Z",
+  "emails_found": 3,
+  "emails_processed": 3,
+  "reports_created": 2,
+  "reports_duplicate": 1,
+  "reports_failed": 0,
+  "error_message": null,
+  "failed_emails": null
+}
+```
+
+**Error Response (IMAP disabled):**
+```json
+{
+  "status": "disabled",
+  "message": "DMARC IMAP sync is not enabled"
+}
+```
+
+**Error Response (Connection failed):**
+```json
+{
+  "sync_id": 44,
+  "sync_type": "manual",
+  "status": "error",
+  "started_at": "2026-01-12T10:35:00Z",
+  "completed_at": "2026-01-12T10:35:30Z",
+  "emails_found": 0,
+  "emails_processed": 0,
+  "reports_created": 0,
+  "reports_duplicate": 0,
+  "reports_failed": 0,
+  "error_message": "[Errno 110] Connection timed out",
+  "failed_emails": null
+}
+```
+
+**Response Fields:**
+- `sync_id`: Unique ID for this sync operation
+- `sync_type`: Always "manual" for API-triggered syncs
+- `status`: "success" or "error"
+- `started_at`: ISO 8601 timestamp when sync started
+- `completed_at`: ISO 8601 timestamp when sync finished
+- `emails_found`: Number of DMARC emails found
+- `emails_processed`: Number of emails processed
+- `reports_created`: Number of new reports created
+- `reports_duplicate`: Number of duplicate reports skipped
+- `reports_failed`: Number of emails that failed processing
+- `error_message`: Error description if sync failed (null on success)
+- `failed_emails`: Array of failed email details (null if none failed)
+
+**Failed Email Object** (when reports_failed > 0):
+```json
+{
+  "email_id": "21",
+  "message_id": "",
+  "subject": "Report Domain: example.com",
+  "error": "Not a valid DMARC report email"
+}
+```
+
+**Notes:**
+- Returns immediately with sync results (synchronous operation)
+- Can be called while automatic sync is disabled
+- Creates sync history record for tracking
+- Duplicate reports are detected and skipped gracefully
+- Failed emails are logged but don't prevent other emails from processing
+- Email notifications sent if SMTP configured and failures occur
+
+---
+
+### GET /api/dmarc/imap/history
+
+Get history of IMAP sync operations.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 20 | Maximum number of sync records to return (1-100) |
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": 43,
+      "sync_type": "manual",
+      "status": "success",
+      "started_at": "2026-01-12T10:30:00Z",
+      "completed_at": "2026-01-12T10:30:05Z",
+      "duration_seconds": 5,
+      "emails_found": 3,
+      "emails_processed": 3,
+      "reports_created": 2,
+      "reports_duplicate": 1,
+      "reports_failed": 0,
+      "error_message": null,
+      "failed_emails": null
+    },
+    {
+      "id": 42,
+      "sync_type": "auto",
+      "status": "success",
+      "started_at": "2026-01-12T08:45:20Z",
+      "completed_at": "2026-01-12T08:45:21Z",
+      "duration_seconds": 1,
+      "emails_found": 5,
+      "emails_processed": 5,
+      "reports_created": 4,
+      "reports_duplicate": 0,
+      "reports_failed": 1,
+      "error_message": "1 emails failed to process",
+      "failed_emails": [
+        {
+          "email_id": "21",
+          "message_id": "",
+          "subject": "FW: Report",
+          "error": "No DMARC attachments found"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `data`: Array of sync history records (newest first)
+
+**Sync Record Fields:**
+- `id`: Unique sync ID
+- `sync_type`: "auto" or "manual"
+- `status`: "success", "error", or "running"
+- `started_at`: ISO 8601 timestamp
+- `completed_at`: ISO 8601 timestamp (null if still running)
+- `duration_seconds`: Sync duration in seconds (null if still running)
+- `emails_found`: Number of emails found
+- `emails_processed`: Number of emails processed
+- `reports_created`: Number of new reports created
+- `reports_duplicate`: Number of duplicates skipped
+- `reports_failed`: Number of failed emails
+- `error_message`: Error description (null if no errors)
+- `failed_emails`: Array of failed email details (null if none)
+
+**Notes:**
+- Results ordered by most recent first
+- Running syncs show null for completed_at and duration_seconds
+- Failed email details include message ID, subject, and error reason
+- Useful for debugging sync issues and monitoring system health
+- History persists across application restarts
 
 ---
 

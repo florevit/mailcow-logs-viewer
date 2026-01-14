@@ -10,6 +10,7 @@
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.1/github-markdown.min.css">
     <script>
         tailwind.config = {
@@ -25,7 +26,7 @@
             color: #3b82f6;
         }
         .modal-tab {
-            padding: 1rem 1.5rem;
+            padding: 0.7rem 1.5rem;
             border-bottom: 2px solid transparent;
             transition: all 0.2s;
             cursor: pointer;
@@ -238,9 +239,9 @@
         }
     </style>
 </head>
-<body class="h-full bg-gray-50 dark:bg-gray-900">
+<body class="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col">
     <!-- Main App Content -->
-    <div id="app-content" class="h-full overflow-auto">
+    <div id="app-content" class="flex flex-col flex-1">
     <!-- Navigation -->
     <nav class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900/30">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -308,6 +309,9 @@
                 <button onclick="switchTab('domains')" id="tab-domains" class="py-4 px-1 font-medium text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 whitespace-nowrap">
                     Domains
                 </button>
+                <button onclick="switchTab('dmarc')" id="tab-dmarc" class="py-4 px-1 font-medium text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 whitespace-nowrap">
+                    DMARC
+                </button>
                 <button onclick="switchTab('settings')" id="tab-settings" class="py-4 px-1 font-medium text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 whitespace-nowrap">
                     Settings
                 </button>
@@ -316,7 +320,7 @@
     </div>
 
     <!-- Main Content -->
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 flex-1 w-full">
         
         <!-- Dashboard Tab -->
         <div id="content-dashboard" class="tab-content">
@@ -702,11 +706,18 @@
             <div class="mb-6">
                 <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                     <div class="text-center lg:text-left">
-                        <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Domains Overview</h2>
+                        <div class="flex items-center justify-center lg:justify-start gap-2">
+                            <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Domains Overview</h2>
+                            <button onclick="showHelpModal('Domains')" class="text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors" title="Help - Domains Information">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                            </button>
+                        </div>
                         <p class="text-gray-600 dark:text-gray-400 mt-1">View Domains Settings with DNS records validation</p>
                     </div>
-                    <div id="dns-check-info" class="flex items-center gap-3 justify-center lg:justify-end">
-                    </div>
+
+                    <div id="dns-check-info" class="flex items-center gap-3 justify-center lg:justify-end"></div>
                 </div>
             </div>
             <div id="domains-loading" class="text-center py-12">
@@ -714,6 +725,182 @@
                 <p class="text-gray-500 dark:text-gray-400">Loading domains...</p>
             </div>
             <div id="domains-content" class="hidden"></div>
+        </div>
+
+        <!-- DMARC Tab -->
+        <div id="content-dmarc" class="tab-content hidden">
+            <!-- Sub-navigation -->
+            <div class="mb-6">
+                <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                    <div class="text-center lg:text-left flex items-center gap-4 justify-center lg:justify-start">
+                        <button id="dmarc-back-btn" onclick="dmarcGoBack()" class="hidden text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">
+                            <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path>
+                            </svg>
+                        </button>
+                        <div>
+                            <div class="flex items-center justify-center lg:justify-start gap-2">
+                                <h2 id="dmarc-page-title" class="text-2xl font-bold text-gray-900 dark:text-white">DMARC Reports</h2>
+                                <button onclick="showHelpModal('DMARC')" class="text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors" title="Help - DMARC Information">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                            <p id="dmarc-subtitle" class="text-gray-600 dark:text-gray-400 mt-1">Monitor Domain Authentication and Global Delivery Reports</p>
+                        </div>
+                    </div>
+                    <div id="dmarc-header-actions" class="flex flex-col sm:flex-row items-center gap-3 justify-center lg:justify-end">
+                        <label id="dmarc-upload-btn" class="hidden cursor-pointer inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 transition shadow-sm">
+                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                            Upload Report
+                            <input type="file" id="dmarc-file-input" class="hidden" accept=".xml,.gz,.zip" onchange="uploadDmarcReport(event)">
+                        </label>
+                        <div id="dmarc-sync-container" class="hidden flex flex-col items-center lg:items-end gap-1">
+                            <button id="dmarc-sync-btn" onclick="triggerDmarcSync()" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 transition shadow-sm">
+                                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                <span id="dmarc-sync-btn-text">Sync from IMAP</span>
+                            </button>
+                            <div id="dmarc-last-sync-info" class="text-xs text-gray-500 dark:text-gray-400 text-right"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Breadcrumb -->
+                <div id="dmarc-breadcrumb" class="text-sm text-gray-500 dark:text-gray-400">
+                </div>
+            </div>
+
+            <!-- Domains List View -->
+            <div id="dmarc-domains-view">
+                <!-- Stats Cards -->
+                <div id="dmarc-main-stats-container"></div>
+
+                <!-- Domains Table -->
+                <div class="rounded-xl overflow-hidden shadow-sm border-0 md:border border-gray-200 dark:border-gray-700" style="background-color: #111827;">
+                    <table class="min-w-full">
+                        <thead class="hidden md:table-header-group bg-gray-700/50">
+                            <tr>
+                                <th class="px-6 py-4 text-left text-sm font-bold text-gray-400">Domain</th>
+                                <th class="px-6 py-4 text-left text-sm font-bold text-gray-400">Activity Period</th>
+                                <th class="px-6 py-4 text-center text-sm font-bold text-gray-400">Reports</th>
+                                <th class="px-6 py-4 text-left text-sm font-bold text-gray-400">Messages (30d)</th>
+                                <th class="px-6 py-4 text-left text-sm font-bold text-gray-400">Unique IPs</th>
+                                <th class="px-6 py-4 text-left text-sm font-bold text-gray-400">DMARC Pass</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dmarc-domains-list" class="block md:table-row-group divide-y divide-gray-700">
+                            </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Domain Overview View (hidden by default) -->
+            <div id="dmarc-overview-view" class="hidden">
+                <!-- Overview Stats -->
+                <div id="dmarc-overview-stats-container"></div>
+
+                <!-- Chart -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-8 relative h-80">
+                    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Email Volume (Last 30 Days)</h3>
+                    <canvas id="dmarc-chart"></canvas>
+                </div>
+
+                <!-- Sub-tabs: Reports | Sources -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="border-b border-gray-200 dark:border-gray-700">
+                        <div class="flex space-x-8 px-6">
+                            <button onclick="dmarcSwitchSubTab('reports')" id="dmarc-subtab-reports" class="modal-tab active">
+                                Daily Reports
+                            </button>
+                            <button onclick="dmarcSwitchSubTab('sources')" id="dmarc-subtab-sources" class="modal-tab">
+                                Source IPs
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Reports Tab Content -->
+                    <div id="dmarc-reports-content" class="p-6">
+                        <div id="dmarc-reports-list" class="space-y-4">
+                            <div class="text-center py-12">
+                                <div class="loading mx-auto mb-4"></div>
+                                <p class="text-gray-500 dark:text-gray-400">Loading reports...</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Sources Tab Content -->
+                    <div id="dmarc-sources-content" class="p-6 hidden">
+                        <div id="dmarc-sources-list">
+                            <div class="text-center py-12">
+                                <div class="loading mx-auto mb-4"></div>
+                                <p class="text-gray-500 dark:text-gray-400">Loading sources...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Report Details View (hidden by default) -->
+            <div id="dmarc-report-details-view" class="hidden">
+                <!-- Stats -->
+                <div id="report-details-stats-container"></div>
+
+                <!-- Sources Table -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sources</h3>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <div id="report-detail-sources-list">
+                            <div class="text-center py-12">
+                                <div class="loading mx-auto mb-4"></div>
+                                <p class="text-gray-500 dark:text-gray-400">Loading sources...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Source Details View (hidden by default) -->
+            <div id="dmarc-source-details-view" class="hidden">
+                <!-- Source Info Header -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-6">
+                    <div class="flex items-start gap-4">
+                        <img id="source-detail-flag" src="" alt="" class="w-12 h-8 object-cover rounded shadow" style="border: 1px solid rgba(0,0,0,0.1);">
+                        <div class="flex-1">
+                            <h3 id="source-detail-name" class="text-xl font-semibold text-gray-900 dark:text-white mb-1">-</h3>
+                            <p id="source-detail-ip" class="text-sm text-gray-600 dark:text-gray-400 mb-2">-</p>
+                            <div class="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
+                                <span id="source-detail-location">-</span>
+                                <span id="source-detail-asn">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stats -->
+                <div id="source-details-stats-container"></div>
+
+                <!-- Envelope From Groups Table -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-white">Email Details</h3>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <div id="source-detail-envelope-list">
+                            <div class="text-center py-12">
+                                <div class="loading mx-auto mb-4"></div>
+                                <p class="text-gray-500 dark:text-gray-400">Loading details...</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Settings Tab -->
@@ -732,7 +919,6 @@
             <!-- Content -->
             <div id="settings-content" class="hidden space-y-6"></div>
         </div>
-
     </div>
 
     <!-- Message Detail Modal -->
@@ -748,21 +934,24 @@
             </div>
             
             <!-- Modal Tabs -->
-            <div class="flex-shrink-0 flex border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
-                <button id="modal-tab-overview" class="modal-tab active" onclick="switchModalTab('overview')">
-                    <span class="text-sm font-medium">Overview</span>
+            <div class="w-full flex border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/50">
+                <button id="modal-tab-overview" class="modal-tab active flex-1 py-2 sm:py-3 px-1 sm:px-4 transition-colors" onclick="switchModalTab('overview')">
+                    <span class="text-xs sm:text-sm font-medium">Overview</span>
                 </button>
-                <button id="modal-tab-postfix" class="modal-tab" onclick="switchModalTab('postfix')">
-                    <span class="text-sm font-medium">Logs</span>
+                <button id="modal-tab-postfix" class="modal-tab flex-1 py-2 sm:py-3 px-1 sm:px-4 transition-colors" onclick="switchModalTab('postfix')">
+                    <span class="text-xs sm:text-sm font-medium">Logs</span>
                 </button>
-                <button id="modal-tab-spam" class="modal-tab" onclick="switchModalTab('spam')">
-                    <span class="text-sm font-medium">Spam Analysis</span>
+                <button id="modal-tab-spam" class="modal-tab flex-1 py-2 sm:py-3 px-1 sm:px-4 transition-colors" onclick="switchModalTab('spam')">
+                    <span class="text-xs sm:text-sm font-medium leading-tight">Spam Analysis</span>
                 </button>
-                <button id="modal-tab-netfilter" class="modal-tab" onclick="switchModalTab('netfilter')">
-                    <span class="text-sm font-medium">Security</span>
+                <button id="modal-tab-netfilter" class="modal-tab flex-1 py-2 sm:py-3 px-1 sm:px-4 transition-colors" onclick="switchModalTab('netfilter')">
+                    <div class="flex items-center justify-center gap-1">
+                        <span class="text-xs sm:text-sm font-medium">Security</span>
+                        <span class="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-green-500 rounded-full shadow-[0_0_8px_rgba(34,197,94,0.6)]"></span>
+                    </div>
                 </button>
             </div>
-            
+
             <!-- Modal Content with fixed height -->
             <div id="message-modal-content" class="flex-1 overflow-y-auto p-6" style="min-height: 400px;">
                 <div class="text-center py-8">
@@ -818,5 +1007,28 @@
     </div> <!-- Close app-content div -->
 
     <script src="/static/app.js"></script>
+
+    <!-- DMARC Sync History Modal -->
+    <div id="dmarc-sync-history-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <div class="bg-white dark:bg-gray-800 rounded-lg max-w-6xl w-full max-h-[80vh] flex flex-col">
+            <div class="flex-shrink-0 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4 flex justify-between items-center rounded-t-lg">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white">IMAP Sync History</h3>
+                <button onclick="closeDmarcSyncHistoryModal()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-6">
+                <div id="dmarc-sync-history-content">
+                    <div class="text-center py-12">
+                        <div class="loading mx-auto mb-4"></div>
+                        <p class="text-gray-500 dark:text-gray-400">Loading sync history...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </body>
 </html>

@@ -3,6 +3,9 @@ Main FastAPI application
 Entry point for the Mailcow Logs Viewer backend
 """
 import logging
+root = logging.getLogger()
+root.handlers = []
+
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -16,9 +19,17 @@ from .mailcow_api import mailcow_api
 from .routers import logs, stats
 from .routers import export as export_router
 from .routers import domains as domains_router
+from .routers import dmarc as dmarc_router
+from .routers import documentation
 from .migrations import run_migrations
 from .auth import BasicAuthMiddleware
 from .version import __version__
+
+from .services.geoip_downloader import (
+    update_geoip_database_if_needed,
+    is_license_configured,
+    get_geoip_status
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +75,32 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize database: {e}")
         raise
     
+    # Initialize GeoIP database (if configured)
+    try:
+        if is_license_configured():
+            logger.info("MaxMind license key configured, checking GeoIP database...")
+            
+            # This will:
+            # 1. Check if database exists
+            # 2. Check if it's older than 7 days
+            # 3. Download if needed
+            # 4. Skip if database is fresh
+            db_available = update_geoip_database_if_needed()
+
+            if db_available:
+                status = get_geoip_status()
+                city_info = status['City']
+                asn_info = status['ASN']
+                logger.info(f"✓ GeoIP ready: City {city_info['size_mb']}MB ({city_info['age_days']}d), ASN {asn_info['size_mb']}MB ({asn_info['age_days']}d)")
+            else:
+                logger.warning("⚠ GeoIP database unavailable, features will be disabled")
+        else:
+            logger.info("MaxMind license key not configured, GeoIP features disabled")
+            logger.info("To enable: Set MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY environment variables")
+    except Exception as e:
+        logger.error(f"Error initializing GeoIP database: {e}")
+        logger.info("Continuing without GeoIP features...")
+
     # Test Mailcow API connection and fetch active domains
     try:
         api_ok = await mailcow_api.test_connection()
@@ -79,6 +116,12 @@ async def lifespan(app: FastAPI):
                     logger.warning("No active domains found in Mailcow - check your configuration")
             except Exception as e:
                 logger.error(f"Failed to fetch active domains: {e}")
+            # Initialize server IP cache for SPF checks
+            try:
+                from app.routers.domains import init_server_ip
+                await init_server_ip()
+            except Exception as e:
+                logger.warning(f"Failed to initialize server IP cache: {e}")
     except Exception as e:
         logger.error(f"Mailcow API test failed: {e}")
     
@@ -128,6 +171,8 @@ app.include_router(status_router.router, prefix="/api", tags=["Status"])
 app.include_router(messages_router.router, prefix="/api", tags=["Messages"])
 app.include_router(settings_router.router, prefix="/api", tags=["Settings"])
 app.include_router(domains_router.router, prefix="/api", tags=["Domains"])
+app.include_router(dmarc_router.router, prefix="/api", tags=["DMARC"])
+app.include_router(documentation.router, prefix="/api", tags=["Documentation"])
 
 # Mount static files (frontend)
 app.mount("/static", StaticFiles(directory="/app/frontend"), name="static")

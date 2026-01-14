@@ -3,53 +3,118 @@ API endpoints for domains management with DNS validation
 """
 import logging
 import asyncio
-from fastapi import APIRouter, HTTPException
+import ipaddress
+import httpx
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any, List
 import dns.resolver
 import dns.asyncresolver
 from datetime import datetime, timezone
-
-from app.mailcow_api import mailcow_api
-
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import get_db
 from app.models import DomainDNSCheck
-from fastapi import Depends
 from app.utils import format_datetime_for_api
+from app.config import settings
+from app.mailcow_api import mailcow_api
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_server_ip_cache = None
+
+
+async def init_server_ip():
+    """
+    Initialize and cache server IP address from Mailcow API
+    Called once during application startup
+    """
+    global _server_ip_cache
+    
+    if _server_ip_cache is not None:
+        return _server_ip_cache
+    
+    try:
+        import httpx
+        from app.config import settings
+        
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{settings.mailcow_url}/api/v1/get/status/host/ip",
+                headers={"X-API-Key": settings.mailcow_api_key}
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            logger.debug(f"Mailcow IP API response: {data}")
+            
+            if isinstance(data, list) and len(data) > 0:
+                _server_ip_cache = data[0].get('ipv4')
+                if _server_ip_cache:
+                    logger.info(f"Server IP cached successfully: {_server_ip_cache}")
+                    return _server_ip_cache
+                else:
+                    logger.warning(f"API response missing 'ipv4' field. Response: {data[0]}")
+            elif isinstance(data, dict):
+                _server_ip_cache = data.get('ipv4')
+                if _server_ip_cache:
+                    logger.info(f"Server IP cached successfully: {_server_ip_cache}")
+                    return _server_ip_cache
+                else:
+                    logger.warning(f"API response missing 'ipv4' field. Response: {data}")
+            else:
+                logger.warning(f"Unexpected API response format. Type: {type(data)}, Data: {data}")
+        
+        logger.warning("Could not fetch server IP from Mailcow - no valid IP in response")
+        return None
+        
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error fetching server IP: {e.response.status_code} - {e.response.text}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch server IP: {type(e).__name__} - {str(e)}")
+        return None
+
+
+def get_cached_server_ip() -> str:
+    """
+    Get the cached server IP address
+    Returns None if not yet cached or failed to fetch
+    """
+    global _server_ip_cache
+    return _server_ip_cache
+
 
 async def check_spf_record(domain: str) -> Dict[str, Any]:
     """
-    Check SPF record for a domain
-    
-    Args:
-        domain: Domain name to check
-        
-    Returns:
-        Dictionary with SPF check results
+    Check SPF record for a domain with full validation
     """
     try:
         resolver = dns.asyncresolver.Resolver()
         resolver.timeout = 5
         resolver.lifetime = 5
         
-        # Query TXT records
         answers = await resolver.resolve(domain, 'TXT')
         
-        # Find SPF record
-        spf_record = None
+        spf_records = []
         for rdata in answers:
             txt_data = b''.join(rdata.strings).decode('utf-8')
             if txt_data.startswith('v=spf1'):
-                spf_record = txt_data
-                break
+                spf_records.append(txt_data)
         
-        if not spf_record:
+        if len(spf_records) > 1:
+            return {
+                'status': 'error',
+                'message': f'Multiple SPF records found ({len(spf_records)}). Only one is allowed',
+                'record': '; '.join(spf_records),
+                'has_strict_all': False,
+                'includes_mx': False,
+                'includes': [],
+                'warnings': ['Multiple SPF records invalidate ALL records']
+            }
+        
+        if not spf_records:
             return {
                 'status': 'error',
                 'message': 'SPF record not found',
@@ -59,44 +124,105 @@ async def check_spf_record(domain: str) -> Dict[str, Any]:
                 'includes': []
             }
         
-        # Check for different 'all' policies
+        spf_record = spf_records[0]
+        
+        if not spf_record.startswith('v=spf1 ') and spf_record != 'v=spf1':
+            return {
+                'status': 'error',
+                'message': 'Invalid SPF syntax - must start with "v=spf1 " (with space)',
+                'record': spf_record,
+                'has_strict_all': False,
+                'includes_mx': False,
+                'includes': []
+            }
+        
+        parts = spf_record.split()
+        mechanisms = parts[1:] if len(parts) > 1 else []
+        
+        valid_prefixes = ['ip4:', 'ip6:', 'a', 'mx', 'include:', 'exists:', 'all']
+        invalid_mechanisms = []
+        
+        for mechanism in mechanisms:
+            clean_mech = mechanism.lstrip('+-~?')
+            is_valid = any(clean_mech == prefix or clean_mech.startswith(prefix) for prefix in valid_prefixes)
+            if not is_valid:
+                invalid_mechanisms.append(mechanism)
+        
+        if invalid_mechanisms:
+            return {
+                'status': 'error',
+                'message': f'Invalid SPF mechanisms: {", ".join(invalid_mechanisms)}',
+                'record': spf_record,
+                'has_strict_all': False,
+                'includes_mx': False,
+                'includes': []
+            }
+        
         spf_lower = spf_record.lower()
         has_strict_all = '-all' in spf_lower
         has_soft_fail = '~all' in spf_lower
         has_neutral = '?all' in spf_lower
-        has_pass_all = '+all' in spf_lower
+        has_pass_all = '+all' in spf_lower or ' all' in spf_lower
         
-        # Check for mx mechanism
-        includes_mx = ' mx' in spf_record or spf_record.startswith('v=spf1 mx')
+        if not (has_strict_all or has_soft_fail or has_neutral or has_pass_all):
+            return {
+                'status': 'error',
+                'message': 'SPF record missing "all" mechanism',
+                'record': spf_record,
+                'has_strict_all': False,
+                'includes_mx': False,
+                'includes': [],
+                'warnings': ['SPF should end with -all or ~all']
+            }
         
-        # Extract include directives
-        includes = []
-        parts = spf_record.split()
-        for part in parts:
-            if part.startswith('include:'):
-                includes.append(part.replace('include:', ''))
+        includes_mx = any(m.lstrip('+-~?') in ['mx'] or m.lstrip('+-~?').startswith('mx:') for m in mechanisms)
         
-        # Determine status and message
-        if has_strict_all:
-            status = 'success'
-            message = 'SPF configured correctly with strict -all policy'
-            warnings = []
-        elif has_soft_fail:
-            status = 'warning'
-            message = 'SPF uses ~all (soft fail). Consider using -all for stricter policy'
-            warnings = ['Using ~all allows some spoofing attempts to pass']
-        elif has_neutral:
-            status = 'warning'
-            message = 'SPF uses ?all (neutral). Consider using -all for stricter policy'
-            warnings = ['Using ?all provides minimal protection']
+        includes = [m.replace('include:', '') for m in mechanisms if m.startswith('include:')]
+        
+        dns_lookup_count = await count_spf_dns_lookups(domain, spf_record, resolver)
+        
+        global _server_ip_cache
+        server_ip = _server_ip_cache
+        
+        if not server_ip:
+            server_ip = await init_server_ip()
+        
+        server_authorized = False
+        authorization_method = None
+        
+        if server_ip:
+            server_authorized, authorization_method = await check_ip_in_spf(domain, server_ip, spf_record, resolver)
+        
+        warnings = []
+        
+        if dns_lookup_count > 10:
+            status = 'error'
+            message = f'SPF has too many DNS lookups ({dns_lookup_count}). Maximum is 10'
+            warnings = [f'SPF record exceeds the 10 DNS lookup limit with {dns_lookup_count} lookups', 'This will cause SPF validation to fail']
         elif has_pass_all:
             status = 'error'
             message = 'SPF uses +all (allows any server). This provides no protection!'
             warnings = ['+all allows anyone to send email as your domain']
-        else:
+        elif not server_authorized and server_ip:
             status = 'error'
-            message = 'SPF record missing "all" mechanism (no policy defined)'
-            warnings = ['SPF should end with -all or ~all']
+            message = f'Server IP {server_ip} is NOT authorized in SPF record'
+            warnings = ['Mail server IP not found in SPF record']
+        elif has_strict_all:
+            status = 'success'
+            message = f'SPF configured correctly with strict -all policy{f". Server IP authorized via {authorization_method}" if server_authorized else ""}'
+            warnings = []
+        elif has_soft_fail:
+            status = 'success'
+            message = f'SPF uses ~all (soft fail){f". Server IP authorized via {authorization_method}" if server_authorized else ""}. Consider using -all for stricter policy'
+            warnings = []
+        elif has_neutral:
+            status = 'warning'
+            message = 'SPF uses ?all (neutral). Consider using -all for stricter policy'
+            warnings = ['Using ?all provides minimal protection']
+        else:
+            status = 'success'
+            message = 'SPF record found'
+            warnings = []
         
         return {
             'status': status,
@@ -105,7 +231,8 @@ async def check_spf_record(domain: str) -> Dict[str, Any]:
             'has_strict_all': has_strict_all,
             'includes_mx': includes_mx,
             'includes': includes,
-            'warnings': warnings
+            'warnings': warnings,
+            'dns_lookups': dns_lookup_count
         }
         
     except dns.resolver.NXDOMAIN:
@@ -136,6 +263,295 @@ async def check_spf_record(domain: str) -> Dict[str, Any]:
             'includes_mx': False,
             'includes': []
         }
+
+
+async def check_ip_in_spf(domain: str, ip_to_check: str, spf_record: str, resolver, visited_domains: set = None, depth: int = 0) -> tuple:
+    """
+    Check if IP is authorized in SPF record recursively
+    Returns: (authorized: bool, method: str or None)
+    """
+    if depth > 10:
+        return False, None
+    
+    if visited_domains is None:
+        visited_domains = set()
+    
+    if domain in visited_domains:
+        return False, None
+    
+    visited_domains.add(domain)
+    
+    parts = spf_record.split()
+    
+    for part in parts:
+        clean_part = part.lstrip('+-~?')
+        
+        if clean_part.startswith('ip4:'):
+            ip_spec = clean_part.replace('ip4:', '')
+            try:
+                if '/' in ip_spec:
+                    network = ipaddress.ip_network(ip_spec, strict=False)
+                    if ipaddress.ip_address(ip_to_check) in network:
+                        return True, f'ip4:{ip_spec}'
+                else:
+                    if ip_to_check == ip_spec:
+                        return True, f'ip4:{ip_spec}'
+            except:
+                pass
+        
+        elif clean_part in ['a'] or clean_part.startswith('a:'):
+            check_domain = domain if clean_part == 'a' else clean_part.split(':', 1)[1]
+            try:
+                a_records = await resolver.resolve(check_domain, 'A')
+                for rdata in a_records:
+                    if str(rdata) == ip_to_check:
+                        return True, f'a:{check_domain}' if clean_part.startswith('a:') else 'a'
+            except:
+                pass
+        
+        elif clean_part in ['mx'] or clean_part.startswith('mx:'):
+            check_domain = domain if clean_part == 'mx' else clean_part.split(':', 1)[1]
+            try:
+                mx_records = await resolver.resolve(check_domain, 'MX')
+                for mx in mx_records:
+                    try:
+                        mx_a_records = await resolver.resolve(str(mx.exchange), 'A')
+                        for rdata in mx_a_records:
+                            if str(rdata) == ip_to_check:
+                                return True, f'mx:{check_domain}' if clean_part.startswith('mx:') else 'mx'
+                    except:
+                        pass
+            except:
+                pass
+        
+        elif clean_part.startswith('include:'):
+            include_domain = clean_part.replace('include:', '')
+            try:
+                include_answers = await resolver.resolve(include_domain, 'TXT')
+                for rdata in include_answers:
+                    include_spf = b''.join(rdata.strings).decode('utf-8')
+                    if include_spf.startswith('v=spf1'):
+                        authorized, method = await check_ip_in_spf(
+                            include_domain, 
+                            ip_to_check, 
+                            include_spf, 
+                            resolver, 
+                            visited_domains.copy(),
+                            depth + 1
+                        )
+                        if authorized:
+                            return True, f'include:{include_domain} ({method})'
+            except:
+                pass
+    
+    return False, None
+
+
+async def count_spf_dns_lookups(domain: str, spf_record: str, resolver, visited_domains: set = None, depth: int = 0) -> int:
+    """
+    Count DNS lookups in SPF record recursively
+    SPF limit is 10 DNS lookups
+    """
+    if depth > 10:
+        return 999
+    
+    if visited_domains is None:
+        visited_domains = set()
+    
+    if domain in visited_domains:
+        return 0
+    
+    visited_domains.add(domain)
+    
+    parts = spf_record.split()
+    lookup_count = 0
+    
+    for part in parts:
+        clean_part = part.lstrip('+-~?')
+        
+        if clean_part.startswith('include:'):
+            lookup_count += 1
+            include_domain = clean_part.replace('include:', '')
+            try:
+                include_answers = await resolver.resolve(include_domain, 'TXT')
+                for rdata in include_answers:
+                    include_spf = b''.join(rdata.strings).decode('utf-8')
+                    if include_spf.startswith('v=spf1'):
+                        nested_count = await count_spf_dns_lookups(
+                            include_domain,
+                            include_spf,
+                            resolver,
+                            visited_domains.copy(),
+                            depth + 1
+                        )
+                        lookup_count += nested_count
+                        break
+            except:
+                pass
+        
+        elif clean_part in ['a'] or clean_part.startswith('a:'):
+            lookup_count += 1
+        
+        elif clean_part in ['mx'] or clean_part.startswith('mx:'):
+            lookup_count += 1
+        
+        elif clean_part.startswith('exists:'):
+            lookup_count += 1
+        
+        elif clean_part.startswith('redirect='):
+            lookup_count += 1
+    
+    return lookup_count
+
+
+async def check_ip_in_spf(domain: str, ip_to_check: str, spf_record: str, resolver, visited_domains: set = None, depth: int = 0) -> tuple:
+    """
+    Check if IP is authorized in SPF record recursively
+    Returns: (authorized: bool, method: str or None)
+    """
+    if depth > 10:
+        return False, None
+    
+    if visited_domains is None:
+        visited_domains = set()
+    
+    if domain in visited_domains:
+        return False, None
+    
+    visited_domains.add(domain)
+    
+    parts = spf_record.split()
+    
+    for part in parts:
+        clean_part = part.lstrip('+-~?')
+        
+        if clean_part.startswith('ip4:'):
+            ip_spec = clean_part.replace('ip4:', '')
+            try:
+                if '/' in ip_spec:
+                    network = ipaddress.ip_network(ip_spec, strict=False)
+                    if ipaddress.ip_address(ip_to_check) in network:
+                        return True, f'ip4:{ip_spec}'
+                else:
+                    if ip_to_check == ip_spec:
+                        return True, f'ip4:{ip_spec}'
+            except:
+                pass
+        
+        elif clean_part in ['a'] or clean_part.startswith('a:'):
+            check_domain = domain if clean_part == 'a' else clean_part.split(':', 1)[1]
+            try:
+                a_records = await resolver.resolve(check_domain, 'A')
+                for rdata in a_records:
+                    if str(rdata) == ip_to_check:
+                        return True, f'a:{check_domain}' if clean_part.startswith('a:') else 'a'
+            except:
+                pass
+        
+        elif clean_part in ['mx'] or clean_part.startswith('mx:'):
+            check_domain = domain if clean_part == 'mx' else clean_part.split(':', 1)[1]
+            try:
+                mx_records = await resolver.resolve(check_domain, 'MX')
+                for mx in mx_records:
+                    try:
+                        mx_a_records = await resolver.resolve(str(mx.exchange), 'A')
+                        for rdata in mx_a_records:
+                            if str(rdata) == ip_to_check:
+                                return True, f'mx:{check_domain}' if clean_part.startswith('mx:') else 'mx'
+                    except:
+                        pass
+            except:
+                pass
+        
+        elif clean_part.startswith('include:'):
+            include_domain = clean_part.replace('include:', '')
+            try:
+                include_answers = await resolver.resolve(include_domain, 'TXT')
+                for rdata in include_answers:
+                    include_spf = b''.join(rdata.strings).decode('utf-8')
+                    if include_spf.startswith('v=spf1'):
+                        authorized, method = await check_ip_in_spf(
+                            include_domain, 
+                            ip_to_check, 
+                            include_spf, 
+                            resolver, 
+                            visited_domains.copy(),
+                            depth + 1
+                        )
+                        if authorized:
+                            return True, f'include:{include_domain} ({method})'
+            except:
+                pass
+    
+    return False, None
+
+
+def parse_dkim_parameters(dkim_record: str) -> Dict[str, Any]:
+    """
+    Parse and validate DKIM record parameters
+    
+    Args:
+        dkim_record: DKIM TXT record string
+        
+    Returns:
+        Dictionary with parameter validation results
+    """
+    issues = []
+    info = []
+    
+    params = {}
+    for part in dkim_record.split(';'):
+        part = part.strip()
+        if '=' in part:
+            key, value = part.split('=', 1)
+            params[key.strip()] = value.strip()
+    
+    if 'p' in params and params['p'] == '':
+        issues.append({
+            'level': 'error',
+            'message': 'DKIM key is revoked (p= is empty)',
+            'description': 'This DKIM record has been intentionally disabled'
+        })
+    
+    if 't' in params:
+        flags = params['t']
+        if 'y' in flags:
+            issues.append({
+                'level': 'critical',
+                'message': 'DKIM is in TESTING mode (t=y)',
+                'description': 'Emails will pass validation even with invalid signatures. Remove t=y for production!'
+            })
+        if 's' in flags:
+            info.append({
+                'level': 'info',
+                'message': 'DKIM uses strict subdomain mode (t=s)',
+                'description': 'Only the main domain can send emails. Subdomains like mail.example.com will fail DKIM validation'
+            })
+    
+    if 'h' in params:
+        hash_algo = params['h'].lower()
+        if hash_algo == 'sha1':
+            issues.append({
+                'level': 'warning',
+                'message': 'DKIM uses SHA1 hash algorithm (h=sha1)',
+                'description': 'SHA1 is deprecated and insecure. Upgrade to SHA256 (h=sha256)'
+            })
+    
+    if 'k' in params:
+        key_type = params['k'].lower()
+        if key_type not in ['rsa', 'ed25519']:
+            issues.append({
+                'level': 'warning',
+                'message': f'Unknown key type: {key_type}',
+                'description': 'Expected rsa or ed25519'
+            })
+    
+    return {
+        'has_issues': len(issues) > 0,
+        'issues': issues,
+        'info': info,
+        'parameters': params
+    }
 
 
 async def check_dkim_record(domain: str) -> Dict[str, Any]:
@@ -169,7 +585,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                     'selector': None,
                     'expected_record': None,
                     'actual_record': None,
-                    'match': False
+                    'match': False,
+                    'warnings': [],
+                    'info': [],
+                    'parameters': {}
                 }
             except httpx.RequestError as e:
                 logger.error(f"Request error fetching DKIM from Mailcow for {domain}: {e}")
@@ -179,7 +598,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                     'selector': None,
                     'expected_record': None,
                     'actual_record': None,
-                    'match': False
+                    'match': False,
+                    'warnings': [],
+                    'info': [],
+                    'parameters': {}
                 }
         
         # Validate response structure - API can return either dict or list
@@ -196,7 +618,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                     'selector': None,
                     'expected_record': None,
                     'actual_record': None,
-                    'match': False
+                    'match': False,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
                 }
             # Get first element from list
             dkim_config = dkim_data[0]
@@ -209,6 +634,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'expected_record': None,
                 'actual_record': None,
                 'match': False
+            ,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
         
         # Validate required fields
@@ -220,7 +649,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'selector': None,
                 'expected_record': None,
                 'actual_record': None,
-                'match': False
+                'match': False,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
         
         selector = dkim_config.get('dkim_selector', 'dkim')
@@ -234,7 +666,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'selector': selector,
                 'expected_record': None,
                 'actual_record': None,
-                'match': False
+                'match': False,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
         
         # Construct DKIM domain
@@ -260,19 +695,52 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
             
             match = expected_clean == actual_clean
             
+            dkim_params = parse_dkim_parameters(actual_record)
+            
+            warnings = []
+            info_messages = []
+            critical_issues = []
+            
+            for issue in dkim_params['issues']:
+                if issue['level'] == 'critical':
+                    critical_issues.append(f"{issue['message']} - {issue['description']}")
+                elif issue['level'] == 'error':
+                    warnings.append(f"❌ {issue['message']}")
+                elif issue['level'] == 'warning':
+                    warnings.append(f"⚠️ {issue['message']}")
+            
+            for item in dkim_params['info']:
+                info_messages.append(item['message'])
+            
+            if critical_issues:
+                status = 'error'
+                message = critical_issues[0]
+            elif not match:
+                status = 'error'
+                message = 'DKIM record mismatch'
+            elif warnings:
+                status = 'warning'
+                message = 'DKIM configured but has warnings'
+            else:
+                status = 'success'
+                message = 'DKIM configured correctly'
+            
             if match:
                 logger.info(f"DKIM check passed for {domain}")
             else:
                 logger.warning(f"DKIM mismatch for {domain}")
             
             return {
-                'status': 'success' if match else 'error',
-                'message': 'DKIM configured correctly' if match else 'DKIM record mismatch',
+                'status': status,
+                'message': message,
                 'selector': selector,
                 'dkim_domain': dkim_domain,
                 'expected_record': expected_value,
                 'actual_record': actual_record,
-                'match': match
+                'match': match,
+                'warnings': warnings,
+                'info': info_messages,
+                'parameters': dkim_params['parameters']
             }
             
         except dns.resolver.NXDOMAIN:
@@ -285,6 +753,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'expected_record': expected_value,
                 'actual_record': None,
                 'match': False
+            ,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
         except dns.resolver.NoAnswer:
             logger.warning(f"No TXT record at {dkim_domain} for {domain}")
@@ -296,6 +768,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'expected_record': expected_value,
                 'actual_record': None,
                 'match': False
+            ,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
         except dns.exception.Timeout:
             logger.error(f"DNS timeout checking DKIM for {domain}")
@@ -306,7 +782,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
                 'dkim_domain': dkim_domain,
                 'expected_record': expected_value,
                 'actual_record': None,
-                'match': False
+                'match': False,
+                'warnings': [],
+                'info': [],
+                'parameters': {}
             }
             
     except Exception as e:
@@ -318,6 +797,10 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
             'expected_record': None,
             'actual_record': None,
             'match': False
+        ,
+            'warnings': [],
+            'info': [],
+            'parameters': {}
         }
 
 

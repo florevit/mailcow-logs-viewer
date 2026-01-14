@@ -95,6 +95,8 @@ docker compose up -d
 
 📖 **Full installation guide:** [Getting Started](documentation/GETTING_STARTED.md)
 
+📘 **Technical Overview: Email Authentication & Monitoring:** How can **mailcow-logs-viewer** help you with this [Read more](documentation/Email_Authentication_Monitoring.md)
+
 ---
 
 ## Architecture
@@ -233,3 +235,10 @@ MIT License
 - **Logs**: `docker compose logs app`
 - **Health**: `http://localhost:8080/api/health`
 - **Issues**: Open issue on GitHub
+
+---
+
+## Credits
+
+* **Flags**: Flag icons are sourced from [Flagpedia.net](https://flagpedia.net/).
+* **Location Data**: This product includes GeoLite2 data created by MaxMind, available from [https://www.maxmind.com](https://www.maxmind.com).

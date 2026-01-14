@@ -370,6 +370,456 @@ def add_is_full_check_column(db: Session):
         db.rollback()
 
 
+def add_postfix_unique_constraint(db: Session):
+    """
+    Add UNIQUE constraint to postfix_logs to prevent duplicate logs
+    
+    Uses a safer approach with batched deletes and proper error handling
+    """
+    logger.info("Adding UNIQUE constraint to postfix_logs...")
+    
+    try:
+        # Check if constraint already exists
+        result = db.execute(text("""
+            SELECT constraint_name 
+            FROM information_schema.table_constraints 
+            WHERE table_name='postfix_logs' 
+            AND constraint_name='uq_postfix_log'
+        """))
+        
+        if result.fetchone():
+            logger.info("UNIQUE constraint already exists, skipping...")
+            return
+        
+        # Step 1: Delete duplicates in small batches to avoid deadlock
+        logger.info("Cleaning up duplicate Postfix logs in batches...")
+        
+        batch_size = 1000
+        total_deleted = 0
+        
+        while True:
+            try:
+                result = db.execute(text(f"""
+                    DELETE FROM postfix_logs
+                    WHERE id IN (
+                        SELECT id
+                        FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY time, program, COALESCE(queue_id, ''), message
+                                       ORDER BY created_at ASC
+                                   ) as row_num
+                            FROM postfix_logs
+                        ) t
+                        WHERE t.row_num > 1
+                        LIMIT {batch_size}
+                    )
+                """))
+                
+                deleted = result.rowcount
+                total_deleted += deleted
+                db.commit()
+                
+                if deleted == 0:
+                    break  # No more duplicates
+                    
+                logger.info(f"Deleted {deleted} duplicates (total: {total_deleted})...")
+                
+            except Exception as e:
+                logger.warning(f"Error deleting batch: {e}")
+                db.rollback()
+                break  # Skip if there's a lock issue
+        
+        if total_deleted > 0:
+            logger.info(f"Deleted {total_deleted} duplicate Postfix logs")
+        else:
+            logger.info("No duplicate Postfix logs found")
+        
+        # Step 2: Add UNIQUE constraint
+        logger.info("Creating UNIQUE constraint...")
+        db.execute(text("""
+            ALTER TABLE postfix_logs
+            ADD CONSTRAINT uq_postfix_log 
+            UNIQUE (time, program, COALESCE(queue_id, ''), message);
+        """))
+        
+        db.commit()
+        logger.info("✓ UNIQUE constraint added successfully")
+        
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "already exists" in error_msg or "duplicate" in error_msg:
+            logger.info("UNIQUE constraint already exists, skipping...")
+            db.rollback()
+        elif "deadlock" in error_msg or "lock" in error_msg:
+            logger.warning(f"Could not add UNIQUE constraint due to lock (will retry on next startup): {e}")
+            db.rollback()
+        else:
+            logger.error(f"Error adding UNIQUE constraint: {e}")
+            db.rollback()
+            # Don't raise - allow app to start
+
+def ensure_dmarc_tables(db: Session):
+    """Ensure DMARC tables exist with proper structure"""
+    logger.info("Checking if DMARC tables exist...")
+    
+    try:
+        # Check if dmarc_reports table exists
+        result = db.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'dmarc_reports'
+            );
+        """))
+        
+        reports_exists = result.fetchone()[0]
+        
+        # Check if dmarc_records table exists
+        result = db.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'dmarc_records'
+            );
+        """))
+        
+        records_exists = result.fetchone()[0]
+        
+        if reports_exists and records_exists:
+            logger.info("DMARC tables already exist")
+            return
+        
+        # If tables exist partially, clean up
+        if reports_exists or records_exists:
+            logger.warning("DMARC tables exist partially, cleaning up...")
+            try:
+                db.execute(text("DROP TABLE IF EXISTS dmarc_records CASCADE;"))
+                db.execute(text("DROP TABLE IF EXISTS dmarc_reports CASCADE;"))
+                db.execute(text("DROP SEQUENCE IF EXISTS dmarc_reports_id_seq CASCADE;"))
+                db.execute(text("DROP SEQUENCE IF EXISTS dmarc_records_id_seq CASCADE;"))
+                db.commit()
+                logger.info("Cleaned up partial DMARC tables")
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup: {cleanup_error}")
+                db.rollback()
+                raise
+        
+        logger.info("Creating DMARC tables...")
+        
+        try:
+            # Create dmarc_reports table
+            db.execute(text("""
+                CREATE TABLE dmarc_reports (
+                    id SERIAL PRIMARY KEY,
+                    report_id VARCHAR(255) NOT NULL UNIQUE,
+                    domain VARCHAR(255) NOT NULL,
+                    org_name VARCHAR(255) NOT NULL,
+                    email VARCHAR(255),
+                    extra_contact_info TEXT,
+                    begin_date INTEGER NOT NULL,
+                    end_date INTEGER NOT NULL,
+                    policy_published JSONB,
+                    domain_id VARCHAR(255),
+                    raw_xml TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            
+            # Create indexes for dmarc_reports
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_report_domain_date 
+                ON dmarc_reports(domain, begin_date);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_report_org 
+                ON dmarc_reports(org_name);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_report_created 
+                ON dmarc_reports(created_at);
+            """))
+            
+            # Create dmarc_records table
+            db.execute(text("""
+                CREATE TABLE dmarc_records (
+                    id SERIAL PRIMARY KEY,
+                    dmarc_report_id INTEGER NOT NULL,
+                    source_ip VARCHAR(50) NOT NULL,
+                    count INTEGER NOT NULL,
+                    disposition VARCHAR(20),
+                    dkim_result VARCHAR(20),
+                    spf_result VARCHAR(20),
+                    header_from VARCHAR(255),
+                    envelope_from VARCHAR(255),
+                    envelope_to VARCHAR(255),
+                    auth_results JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            
+            # Create indexes for dmarc_records
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_record_report 
+                ON dmarc_records(dmarc_report_id);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_record_ip 
+                ON dmarc_records(source_ip);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX idx_dmarc_record_results 
+                ON dmarc_records(dkim_result, spf_result);
+            """))
+            
+            db.commit()
+            logger.info("✓ DMARC tables created successfully")
+            
+        except Exception as create_error:
+            db.rollback()
+            
+            # Handle duplicate key errors (PostgreSQL artifacts)
+            if "duplicate key value violates unique constraint" in str(create_error).lower():
+                logger.warning("Detected PostgreSQL artifacts, cleaning up...")
+                
+                try:
+                    # Clean up ALL artifacts
+                    db.execute(text("DROP TABLE IF EXISTS dmarc_records CASCADE;"))
+                    db.execute(text("DROP TABLE IF EXISTS dmarc_reports CASCADE;"))
+                    db.execute(text("DROP SEQUENCE IF EXISTS dmarc_reports_id_seq CASCADE;"))
+                    db.execute(text("DROP SEQUENCE IF EXISTS dmarc_records_id_seq CASCADE;"))
+                    db.commit()
+                    logger.info("Cleaned up PostgreSQL artifacts")
+                    
+                    # Retry - create tables again
+                    db.execute(text("""
+                        CREATE TABLE dmarc_reports (
+                            id SERIAL PRIMARY KEY,
+                            report_id VARCHAR(255) NOT NULL UNIQUE,
+                            domain VARCHAR(255) NOT NULL,
+                            org_name VARCHAR(255) NOT NULL,
+                            email VARCHAR(255),
+                            extra_contact_info TEXT,
+                            begin_date INTEGER NOT NULL,
+                            end_date INTEGER NOT NULL,
+                            policy_published JSONB,
+                            domain_id VARCHAR(255),
+                            raw_xml TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_report_domain_date 
+                        ON dmarc_reports(domain, begin_date);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_report_org 
+                        ON dmarc_reports(org_name);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_report_created 
+                        ON dmarc_reports(created_at);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE TABLE dmarc_records (
+                            id SERIAL PRIMARY KEY,
+                            dmarc_report_id INTEGER NOT NULL,
+                            source_ip VARCHAR(50) NOT NULL,
+                            count INTEGER NOT NULL,
+                            disposition VARCHAR(20),
+                            dkim_result VARCHAR(20),
+                            spf_result VARCHAR(20),
+                            header_from VARCHAR(255),
+                            envelope_from VARCHAR(255),
+                            envelope_to VARCHAR(255),
+                            auth_results JSONB,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_record_report 
+                        ON dmarc_records(dmarc_report_id);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_record_ip 
+                        ON dmarc_records(source_ip);
+                    """))
+                    
+                    db.execute(text("""
+                        CREATE INDEX idx_dmarc_record_results 
+                        ON dmarc_records(dkim_result, spf_result);
+                    """))
+                    
+                    db.commit()
+                    logger.info("✓ DMARC tables created after cleanup")
+                    
+                except Exception as retry_error:
+                    logger.error(f"Failed after cleanup: {retry_error}")
+                    db.rollback()
+                    raise
+            else:
+                logger.error(f"Failed to create DMARC tables: {create_error}")
+                raise
+        
+    except Exception as e:
+        logger.error(f"Error ensuring DMARC tables: {e}")
+        db.rollback()
+        raise
+
+def add_geoip_fields_to_dmarc(db: Session):
+    """Add GeoIP fields to dmarc_records table"""
+    logger.info("Checking if GeoIP fields exist in dmarc_records...")
+    
+    try:
+        result = db.execute(text("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='dmarc_records' 
+            AND column_name='country_code'
+        """))
+        
+        if result.fetchone() is None:
+            logger.info("Adding GeoIP fields to dmarc_records...")
+            
+            db.execute(text("""
+                ALTER TABLE dmarc_records 
+                ADD COLUMN country_code VARCHAR(2),
+                ADD COLUMN country_name VARCHAR(100),
+                ADD COLUMN country_emoji VARCHAR(10),
+                ADD COLUMN city VARCHAR(100),
+                ADD COLUMN asn VARCHAR(20),
+                ADD COLUMN asn_org VARCHAR(255);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_dmarc_record_country 
+                ON dmarc_records(country_code);
+            """))
+            
+            db.commit()
+            logger.info("✓ GeoIP fields added to dmarc_records")
+        else:
+            logger.info("✓ GeoIP fields already exist in dmarc_records")
+        
+    except Exception as e:
+        logger.error(f"Error adding GeoIP fields: {e}")
+        db.rollback()
+
+def add_geoip_fields_to_rspamd(db: Session):
+    """Add GeoIP fields to rspamd_logs table"""
+    logger.info("Checking if GeoIP fields exist in rspamd_logs...")
+    
+    try:
+        result = db.execute(text("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='rspamd_logs' 
+            AND column_name='country_code'
+        """))
+        
+        if result.fetchone() is None:
+            logger.info("Adding GeoIP fields to rspamd_logs...")
+            
+            db.execute(text("""
+                ALTER TABLE rspamd_logs 
+                ADD COLUMN country_code VARCHAR(2),
+                ADD COLUMN country_name VARCHAR(100),
+                ADD COLUMN city VARCHAR(100),
+                ADD COLUMN asn VARCHAR(20),
+                ADD COLUMN asn_org VARCHAR(255);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_rspamd_country 
+                ON rspamd_logs(country_code);
+            """))
+            
+            db.commit()
+            logger.info("✓ GeoIP fields added to rspamd_logs")
+        else:
+            logger.info("✓ GeoIP fields already exist in rspamd_logs")
+        
+    except Exception as e:
+        logger.error(f"Error adding GeoIP fields to rspamd_logs: {e}")
+        db.rollback()
+
+def create_dmarc_sync_table(db: Session):
+    """
+    Create dmarc_syncs table for tracking IMAP sync operations
+    This table tracks automatic and manual DMARC report imports from IMAP
+    """
+    logger.info("Checking if dmarc_syncs table exists...")
+    
+    try:
+        # Check if table already exists
+        result = db.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'dmarc_syncs'
+            );
+        """))
+        
+        table_exists = result.scalar()
+        
+        if table_exists:
+            logger.info("✓ dmarc_syncs table already exists")
+            return
+        
+        logger.info("Creating dmarc_syncs table...")
+        
+        # Create table
+        db.execute(text("""
+            CREATE TABLE dmarc_syncs (
+                id SERIAL PRIMARY KEY,
+                sync_type VARCHAR(20) NOT NULL,
+                started_at TIMESTAMP NOT NULL,
+                completed_at TIMESTAMP,
+                status VARCHAR(20) NOT NULL,
+                
+                emails_found INTEGER DEFAULT 0,
+                emails_processed INTEGER DEFAULT 0,
+                reports_created INTEGER DEFAULT 0,
+                reports_duplicate INTEGER DEFAULT 0,
+                reports_failed INTEGER DEFAULT 0,
+                
+                error_message TEXT,
+                failed_emails JSONB,
+                
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """))
+        
+        # Create indexes
+        db.execute(text("""
+            CREATE INDEX idx_dmarc_sync_type_status 
+            ON dmarc_syncs(sync_type, status);
+        """))
+        
+        db.execute(text("""
+            CREATE INDEX idx_dmarc_sync_started 
+            ON dmarc_syncs(started_at);
+        """))
+        
+        db.commit()
+        logger.info("✓ dmarc_syncs table created successfully")
+        
+    except Exception as e:
+        logger.error(f"Error creating dmarc_syncs table: {e}")
+        db.rollback()
+        raise
+
 def run_migrations():
     """
     Run all database migrations and maintenance tasks
@@ -389,8 +839,19 @@ def run_migrations():
         ensure_domain_dns_checks_table(db)
         add_is_full_check_column(db)
 
+        # UNIQUE postfix logs
+        add_postfix_unique_constraint(db)
+
         # Clean up duplicate correlations
         removed = cleanup_duplicate_correlations(db)
+
+        # DMARC table
+        ensure_dmarc_tables(db)
+        create_dmarc_sync_table(db)
+
+        # GeoIP fields
+        add_geoip_fields_to_dmarc(db)
+        add_geoip_fields_to_rspamd(db)
         
         if removed > 0:
             logger.info(f"Migration complete: Cleaned up {removed} duplicate correlations")

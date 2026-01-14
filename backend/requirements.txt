@@ -34,6 +34,11 @@ tenacity==8.2.3
 # DNS Queries - Required for domains management
 dnspython==2.6.1
 
+# MaxMind
+geoip2>=4.7.0
+maxminddb>=2.4.0
+requests>=2.31.0
+
 # Testing (optional, for development)
 pytest==7.4.4
 pytest-asyncio==0.23.3

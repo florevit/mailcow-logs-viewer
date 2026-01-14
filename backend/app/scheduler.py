@@ -13,14 +13,25 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
+from sqlalchemy.exc import IntegrityError
 
-from .config import settings
+from .config import settings, set_cached_active_domains
 from .database import get_db_context
 from .mailcow_api import mailcow_api
 from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from .correlation import detect_direction, parse_postfix_message
 from .models import DomainDNSCheck
 from .routers.domains import check_domain_dns, save_dns_check_to_db
+from .services.dmarc_imap_service import sync_dmarc_reports_from_imap
+from .services.dmarc_notifications import send_dmarc_error_notification
+from .services import geoip_service
+
+from .services.geoip_downloader import (
+    update_geoip_database_if_needed,
+    is_license_configured,
+    get_geoip_status
+)
+from .services.geoip_downloader import is_license_configured
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +43,9 @@ job_status = {
     'expire_correlations': {'last_run': None, 'status': 'idle', 'error': None},
     'cleanup_logs': {'last_run': None, 'status': 'idle', 'error': None},
     'check_app_version': {'last_run': None, 'status': 'idle', 'error': None},
-    'dns_check': {'last_run': None, 'status': 'idle', 'error': None}
+    'dns_check': {'last_run': None, 'status': 'idle', 'error': None},
+    'update_geoip': {'last_run': None, 'status': 'idle', 'error': None},
+    'dmarc_imap_sync': {'last_run': None, 'status': 'idle', 'error': None}
 }
 
 def update_job_status(job_name: str, status: str, error: str = None):
@@ -168,6 +181,7 @@ async def fetch_and_store_postfix():
         
         with get_db_context() as db:
             new_count = 0
+            skipped_count = 0
             skipped_blacklist = 0
             blacklisted_queue_ids: Set[str] = set()
             
@@ -209,6 +223,7 @@ async def fetch_and_store_postfix():
                     unique_id = f"{time_str}:{message[:100]}"
                     
                     if unique_id in seen_postfix:
+                        skipped_count += 1
                         continue
                     
                     # Parse message for fields
@@ -247,17 +262,29 @@ async def fetch_and_store_postfix():
                     )
                     
                     db.add(postfix_log)
+                    db.flush()
+                    
                     seen_postfix.add(unique_id)
                     new_count += 1
                     
+                except IntegrityError:
+                    # Duplicate log - skip silently
+                    db.rollback()
+                    seen_postfix.add(unique_id)
+                    skipped_count += 1
+                    continue
+                    
                 except Exception as e:
                     logger.error(f"Error processing Postfix log: {e}")
+                    db.rollback()
                     continue
             
             db.commit()
             
-            if new_count > 0:
+            if new_count > 0 or skipped_count > 0:
                 msg = f"[OK] Imported {new_count} Postfix logs"
+                if skipped_count > 0:
+                    msg += f" (skipped {skipped_count} duplicates)"
                 if skipped_blacklist > 0:
                     msg += f" (skipped {skipped_blacklist} blacklisted)"
                 logger.info(msg)
@@ -335,6 +362,14 @@ async def fetch_and_store_rspamd():
                         size=log_entry.get('size'),
                         raw_data=log_entry
                     )
+
+                    if geoip_service.is_geoip_available() and rspamd_log.ip:
+                        geo_info = geoip_service.lookup_ip(rspamd_log.ip)
+                        rspamd_log.country_code = geo_info.get('country_code')
+                        rspamd_log.country_name = geo_info.get('country_name')
+                        rspamd_log.city = geo_info.get('city')
+                        rspamd_log.asn = geo_info.get('asn')
+                        rspamd_log.asn_org = geo_info.get('asn_org')
                     
                     db.add(rspamd_log)
                     seen_rspamd.add(unique_id)
@@ -987,7 +1022,7 @@ async def update_final_status_for_correlations():
     1. Finds correlations without a definitive final_status
     2. Only checks correlations within Max Correlation Age
     3. Looks for new Postfix logs that may have arrived
-    4. Updates final_status if a better status is found
+    4. Updates final_status, postfix_log_ids, and correlation_key
     
     This runs independently from correlation creation to ensure we catch
     late-arriving Postfix logs.
@@ -1013,7 +1048,7 @@ async def update_final_status_for_correlations():
                     MessageCorrelation.final_status.is_(None),
                     MessageCorrelation.final_status.notin_(['delivered', 'bounced', 'rejected', 'expired'])
                 )
-            ).limit(100).all()
+            ).limit(500).all()  # Increased from 100 to 500
             
             if not correlations_to_check:
                 return
@@ -1032,7 +1067,6 @@ async def update_final_status_for_correlations():
                     
                     # Determine best final status from all Postfix logs
                     # Priority: bounced > rejected > sent (delivered) > deferred
-                    # We check all logs to find the best status
                     new_final_status = correlation.final_status
                     
                     for plog in all_postfix:
@@ -1047,13 +1081,33 @@ async def update_final_status_for_correlations():
                             elif plog.status == 'deferred' and new_final_status not in ['bounced', 'rejected', 'delivered']:
                                 new_final_status = 'deferred'
                     
-                    # Update if we found a better status
-                    if new_final_status and new_final_status != correlation.final_status:
+                    # FIX #1: Update postfix_log_ids - add any missing logs
+                    current_ids = list(correlation.postfix_log_ids or [])
+                    ids_added = 0
+                    for plog in all_postfix:
+                        if plog.id and plog.id not in current_ids:
+                            current_ids.append(plog.id)
+                            ids_added += 1
+                    
+                    if ids_added > 0:
+                        correlation.postfix_log_ids = current_ids
+                    
+                    # FIX #2: Update correlation_key in ALL Postfix logs
+                    for plog in all_postfix:
+                        if not plog.correlation_key or plog.correlation_key != correlation.correlation_key:
+                            plog.correlation_key = correlation.correlation_key
+                    
+                    # Update if we found a better status or added logs
+                    if (new_final_status and new_final_status != correlation.final_status) or ids_added > 0:
                         old_status = correlation.final_status
                         correlation.final_status = new_final_status
                         correlation.last_seen = datetime.now(timezone.utc)
                         updated_count += 1
-                        logger.debug(f"Updated final_status for correlation {correlation.id} ({correlation.message_id[:40] if correlation.message_id else 'no-id'}...): {old_status} -> {new_final_status}")
+                        
+                        if ids_added > 0:
+                            logger.debug(f"Updated correlation {correlation.id}: added {ids_added} logs, status {old_status} -> {new_final_status}")
+                        else:
+                            logger.debug(f"Updated final_status for correlation {correlation.id} ({correlation.message_id[:40] if correlation.message_id else 'no-id'}...): {old_status} -> {new_final_status}")
                 
                 except Exception as e:
                     logger.warning(f"Failed to update final_status for correlation {correlation.id}: {e}")
@@ -1068,6 +1122,89 @@ async def update_final_status_for_correlations():
     except Exception as e:
         logger.error(f"[ERROR] Update final status error: {e}")
         update_job_status('update_final_status', 'failed', str(e))
+
+
+async def update_geoip_database():
+    """Background job: Update GeoIP databases"""
+    from .services.geoip_downloader import (
+        update_geoip_database_if_needed,
+        is_license_configured
+    )
+    
+    try:
+        update_job_status('update_geoip', 'running')
+        
+        if not is_license_configured():
+            update_job_status('update_geoip', 'idle', 'License key not configured')
+            return
+        
+        status = update_geoip_database_if_needed()
+        
+        if status['City']['updated'] or status['ASN']['updated']:
+            update_job_status('update_geoip', 'success')
+        else:
+            update_job_status('update_geoip', 'success')
+        
+    except Exception as e:
+        logger.error(f"GeoIP update failed: {e}")
+        update_job_status('update_geoip', 'failed', str(e))
+
+
+async def dmarc_imap_sync_job():
+    """
+    Scheduled job to sync DMARC reports from IMAP mailbox
+    Runs every hour (configurable via DMARC_IMAP_INTERVAL)
+    """
+    if not settings.dmarc_imap_enabled:
+        logger.debug("DMARC IMAP sync is disabled, skipping")
+        return
+    
+    # Global cleanup to ensure no other job is stuck in 'running' state
+    try:
+        # Assuming you have a way to get a DB session here
+        from your_app.database import SessionLocal 
+        with SessionLocal() as db:
+            db.query(DMARCSync).filter(DMARCSync.status == 'running').update({
+                "status": "failed",
+                "error_message": "Stale job cleaned by scheduler"
+            })
+            db.commit()
+    except Exception as cleanup_err:
+        logger.warning(f"Background cleanup failed: {cleanup_err}")
+
+    # Start the current job
+    update_job_status('dmarc_imap_sync', 'running')
+    
+    try:
+        logger.info("Starting DMARC IMAP sync...")
+        
+        # Execute the actual IMAP sync logic
+        result = sync_dmarc_reports_from_imap(sync_type='auto')
+        
+        if result.get('status') == 'error':
+            error_msg = result.get('error_message', 'Unknown error')
+            logger.error(f"DMARC IMAP sync failed: {error_msg}")
+            update_job_status('dmarc_imap_sync', 'failed', error_msg)
+            
+            # Send notification if needed
+            failed_emails = result.get('failed_emails')
+            if failed_emails and settings.notification_smtp_configured:
+                try:
+                    send_dmarc_error_notification(failed_emails, result.get('sync_id'))
+                except Exception as e:
+                    logger.error(f"Failed to send error notification: {e}")
+        else:
+            # Sync finished successfully
+            logger.info(f"DMARC IMAP sync completed: {result.get('reports_created', 0)} created")
+            update_job_status('dmarc_imap_sync', 'success')
+            
+    except Exception as e:
+        # Catch-all for unexpected crashes
+        logger.error(f"DMARC IMAP sync job error: {e}", exc_info=True)
+        update_job_status('dmarc_imap_sync', 'failed', str(e))
+    finally:
+        # Ensure the state is never left as 'running' if the code reaches here
+        logger.debug("DMARC IMAP sync job cycle finished")
 
 
 # =============================================================================
@@ -1243,6 +1380,32 @@ async def check_all_domains_dns_background():
         update_job_status('dns_check', 'failed', str(e))
 
 
+async def sync_local_domains():
+    """
+    Sync local domains from Mailcow API
+    Runs every 6 hours
+    """
+
+    logger.info("Starting background local domains sync...")
+    update_job_status('sync_local_domains', 'running')
+    
+    try:
+        active_domains = await mailcow_api.get_active_domains()
+        if active_domains:
+            set_cached_active_domains(active_domains)
+            logger.info(f"✓ Local domains synced: {len(active_domains)} domains")
+            update_job_status('sync_local_domains', 'success')
+            return True
+        else:
+            logger.warning("⚠ No active domains retrieved")
+            update_job_status('sync_local_domains', 'failed', str(e))
+            return False
+    
+    except Exception as e:
+        logger.error(f"✗ Failed to sync local domains: {e}")
+        update_job_status('sync_local_domains', 'failed', str(e))
+        return False
+
 # =============================================================================
 # SCHEDULER SETUP
 # =============================================================================
@@ -1323,7 +1486,7 @@ def start_scheduler():
             name='Check App Version Updates',
             replace_existing=True,
             max_instances=1,
-            next_run_time=datetime.now(timezone.utc)  # Run immediately on startup
+            next_run_time=datetime.now(timezone.utc)
         )
         
         # Job 8: DNS Check
@@ -1336,16 +1499,73 @@ def start_scheduler():
             max_instances=1
         )
         
+        # Job 8b: Initial DNS check on startup
         scheduler.add_job(
             check_all_domains_dns_background,
             'date',
-            run_date=datetime.now(timezone.utc) + timedelta(seconds=30),
+            run_date=datetime.now(timezone.utc) + timedelta(seconds=60),
             id='dns_check_startup',
             name='DNS Check (Startup)'
         )
 
-        scheduler.start()
+        # Job 9: Sync local domains (every 6 hours)
+        scheduler.add_job(
+            sync_local_domains,
+            IntervalTrigger(hours=6),
+            id='sync_local_domains',
+            name='Sync Local Domains',
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=datetime.now(timezone.utc)
+        )
+
+        # Job 11: Update GeoIP database (weekly, Sunday at 3 AM)
+        # Only runs if MaxMind license key is configured
+        if is_license_configured():
+            scheduler.add_job(
+                update_geoip_database,
+                trigger=CronTrigger(day_of_week='sun', hour=3, minute=0),
+                id='update_geoip',
+                name='Update GeoIP',
+                replace_existing=True
+            )
+            
+            # Run initial check on startup (after 60 seconds to let everything settle)
+            scheduler.add_job(
+                update_geoip_database,
+                'date',
+                run_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+                id='geoip_startup',
+                name='GeoIP Check (Startup)'
+            )
+            logger.info("   [GEOIP] Initial GeoIP check scheduled (60 seconds after startup)")
+        else:
+            logger.info("   [GEOIP] MaxMind license key not configured, GeoIP features disabled")
+
+        # Job 12: DMARC IMAP Sync - runs at configured interval (default: hourly)
+        if settings.dmarc_imap_enabled:
+            scheduler.add_job(
+                dmarc_imap_sync_job,
+                IntervalTrigger(seconds=settings.dmarc_imap_interval),
+                id='dmarc_imap_sync',
+                name='DMARC IMAP Sync',
+                replace_existing=True
+            )
+            logger.info(f"Scheduled DMARC IMAP sync job (interval: {settings.dmarc_imap_interval}s)")
         
+        # Run once on startup if configured
+        if settings.dmarc_imap_run_on_startup:
+            scheduler.add_job(
+                dmarc_imap_sync_job,
+                'date',
+                run_date=datetime.now() + timedelta(seconds=30),
+                id='dmarc_imap_sync_startup',
+                name='DMARC IMAP Sync (Startup)'
+            )
+            logger.info("Scheduled initial DMARC IMAP sync on startup")
+
+        scheduler.start()
+
         logger.info("[OK] Scheduler started")
         logger.info(f"   [INFO] Import: every {settings.fetch_interval}s")
         logger.info(f"   [LINK] Correlation: every 30s")
@@ -1354,6 +1574,13 @@ def start_scheduler():
         logger.info(f"   [EXPIRE] Old correlations: every 60s (expire after {settings.max_correlation_age_minutes}min)")
         logger.info(f"   [VERSION] Check app version updates: every 6 hours")
         logger.info(f"   [DNS] Check all domains DNS: every 6 hours")
+        logger.info("   [GEOIP] Update GeoIP database: weekly (Sunday 3 AM)")
+
+        
+        if settings.dmarc_imap_enabled:
+            logger.info(f"   [DMARC] IMAP sync: every {settings.dmarc_imap_interval // 60} minutes")
+        else:
+            logger.info("   [DMARC] IMAP sync: disabled")
         
         # Log blacklist status
         blacklist = settings.blacklist_emails_list
