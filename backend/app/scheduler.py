@@ -16,11 +16,10 @@ from sqlalchemy import desc, or_
 from sqlalchemy.exc import IntegrityError
 
 from .config import settings, set_cached_active_domains
-from .database import get_db_context
+from .database import get_db_context, SessionLocal
 from .mailcow_api import mailcow_api
-from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
+from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation, DMARCSync, DomainDNSCheck
 from .correlation import detect_direction, parse_postfix_message
-from .models import DomainDNSCheck
 from .routers.domains import check_domain_dns, save_dns_check_to_db
 from .services.dmarc_imap_service import sync_dmarc_reports_from_imap
 from .services.dmarc_notifications import send_dmarc_error_notification
@@ -1162,7 +1161,6 @@ async def dmarc_imap_sync_job():
     # Global cleanup to ensure no other job is stuck in 'running' state
     try:
         # Assuming you have a way to get a DB session here
-        from your_app.database import SessionLocal 
         with SessionLocal() as db:
             db.query(DMARCSync).filter(DMARCSync.status == 'running').update({
                 "status": "failed",

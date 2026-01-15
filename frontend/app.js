@@ -11,6 +11,7 @@
 let authCredentials = null;
 // DMARC imap
 let dmarcImapStatus = null;
+let dmarcConfiguration = null;
 
 // Load saved credentials from sessionStorage
 function loadAuthCredentials() {
@@ -4612,10 +4613,29 @@ let dmarcState = {
     chartInstance: null
 };
 
+async function loadDmarcSettings() {
+    try {
+        const response = await authenticatedFetch('/api/settings/info');
+        if (!response.ok) {
+            dmarcConfiguration = null;
+            return;
+        }
+        
+        const data = await response.json();
+        dmarcConfiguration = data.dmarc_configuration || {};
+        console.log('DMARC settings loaded:', dmarcConfiguration);
+        
+    } catch (error) {
+        console.error('Error loading DMARC settings:', error);
+        dmarcConfiguration = null;
+    }
+}
+
 async function loadDmarc() {
     console.log('Loading DMARC tab...');
     dmarcState.currentView = 'domains';
     dmarcState.currentDomain = null;
+    await loadDmarcSettings();
     await loadDmarcImapStatus();
     await loadDmarcDomains();
 }
@@ -5386,9 +5406,9 @@ function updateDmarcControls() {
     const syncContainer = document.getElementById('dmarc-sync-container');
     const lastSyncInfo = document.getElementById('dmarc-last-sync-info');
     
-    // Toggle manual upload button
+    // Toggle upload button
     if (uploadBtn) {
-        if (dmarcImapStatus && dmarcImapStatus.manual_upload_enabled === true) {
+        if (dmarcConfiguration?.manual_upload_enabled === true) {
             uploadBtn.classList.remove('hidden');
         } else {
             uploadBtn.classList.add('hidden');

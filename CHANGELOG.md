@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.4] - 2026-01-15
+
+### Fixed
+
+### DMARC Manual Upload Button Not Showing
+- Fixed issue where manual upload button was hidden even when enabled in settings
+
+### DKIM Record Validation False Negatives
+- Fixed DKIM validation incorrectly reporting mismatch when parameter order differs
+- Changed validation from string comparison to parameter-based comparison
+- DKIM records now validated correctly regardless of parameter order (e.g., `p=...;s=t` equals `s=t;p=...`)
+- Follows RFC standard where DKIM parameter order is insignificant
+
+---
+
 ## [2.0.0] - 2026-01-14
 
 ### Added

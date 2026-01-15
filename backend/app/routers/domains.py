@@ -554,6 +554,17 @@ def parse_dkim_parameters(dkim_record: str) -> Dict[str, Any]:
     }
 
 
+def normalize_dkim_record(record: str) -> Dict[str, str]:
+    """Parse DKIM record into normalized parameter dictionary"""
+    params = {}
+    for part in record.split(';'):
+        part = part.strip().replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '')
+        if '=' in part:
+            key, value = part.split('=', 1)
+            params[key.strip()] = value.strip()
+    return params
+
+
 async def check_dkim_record(domain: str) -> Dict[str, Any]:
     """
     Check DKIM record for a domain
@@ -693,7 +704,13 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
             expected_clean = expected_value.replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '')
             actual_clean = actual_record.replace(' ', '').replace('\n', '').replace('\r', '').replace('\t', '')
             
-            match = expected_clean == actual_clean
+            # Parse both records into parameters
+            expected_params = normalize_dkim_record(expected_value)
+            actual_params = normalize_dkim_record(actual_record)
+            
+            # Compare parameters, not raw strings
+            match = expected_params == actual_params
+            # match = expected_clean == actual_clean
             
             dkim_params = parse_dkim_parameters(actual_record)
             
