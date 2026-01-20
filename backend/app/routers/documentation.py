@@ -12,6 +12,7 @@ GITHUB_DOCS_BASE_URL = "https://raw.githubusercontent.com/ShlomiPorush/mailcow-l
 ALLOWED_DOCS = {
     "Domains": "Domains.md",
     "DMARC": "DMARC.md",
+    "Mailbox_Stats": "Mailbox_Stats.md",
 }
 
 @router.get("/docs/{doc_name}", response_class=PlainTextResponse)
