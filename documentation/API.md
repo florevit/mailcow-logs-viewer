@@ -56,6 +56,7 @@ The application supports two authentication methods that can be enabled independ
 - `GET /api/auth/callback` - OAuth2 callback handler
 
 **Protected Endpoints (Authentication Required):**
+- `GET /api/auth/verify` - Verify Basic Auth credentials (used by login form; returns 401 if invalid)
 - All other `/api/*` endpoints
 
 ### Authentication Methods
@@ -308,6 +309,28 @@ Check current authentication status and get user information.
 - Checks for OAuth2 session cookie first
 - Falls back to Basic Auth header if OAuth2 not found
 - User object structure depends on OAuth2 provider (varies by provider)
+
+---
+
+### GET /api/auth/verify
+
+Verify Basic Auth credentials. Used by the login form to validate username/password before redirecting to the main app. This endpoint is **not** in the public paths: the middleware validates the `Authorization: Basic` header and returns 401 if credentials are wrong.
+
+**Authentication:** Required (HTTP Basic Auth). Invalid or missing credentials return 401.
+
+**Response (Valid credentials):** `200 OK`
+```json
+{
+  "verified": true
+}
+```
+
+**Error Responses:**
+- `401 Unauthorized`: Invalid or missing Basic Auth credentials (e.g. wrong username or password)
+
+**Notes:**
+- Only relevant when Basic Auth is enabled
+- Login page calls this endpoint to test credentials; on 401 it shows "Invalid username or password" and does not redirect
 
 ---
 
@@ -1844,13 +1867,26 @@ Get combined status summary for dashboard.
 
 ## Settings
 
-### GET /settings/info
+### GET /api/settings/info
 
 Get system configuration and status information.
+
+**Description:**
+Returns comprehensive system configuration, import status, correlation status, and background job status. When `SETTINGS_EDIT_VIA_UI_ENABLED=true`, also includes editable configuration and migration status.
+
+**Authentication:** Required
 
 **Response:**
 ```json
 {
+  "settings_edit_via_ui_enabled": true,
+  "settings_migrated": true,
+  "editable_config": {
+    "mailcow_url": "https://mail.example.com",
+    "mailcow_api_key": "********",
+    "fetch_interval": 60,
+    "retention_days": 7
+  },
   "configuration": {
     "mailcow_url": "https://mail.example.com",
     "local_domains": ["example.com"],
@@ -1982,6 +2018,11 @@ Get system configuration and status information.
 }
 ```
 
+**Response Fields (when `SETTINGS_EDIT_VIA_UI_ENABLED=true`):**
+- `settings_edit_via_ui_enabled`: Boolean indicating if UI editing is enabled
+- `settings_migrated`: Boolean indicating if settings have been migrated from ENV to DB
+- `editable_config`: Dictionary of editable settings (sensitive fields masked) - only present when UI editing is enabled
+
 **Background Jobs Status Tracking:**
 
 Each background job reports real-time execution status:
@@ -2013,6 +2054,240 @@ Each background job reports real-time execution status:
 6. **check_app_version**: Checks GitHub for application updates every 6 hours
 7. **dns_check**: Validates DNS records (SPF, DKIM, DMARC) for all active domains every 6 hours
 8. **update_geoip**: Updates MaxMind GeoLite2 databases (City + ASN) for DMARC source IP enrichment (runs weekly on Sunday at 3 AM)
+
+---
+
+### GET /api/settings
+
+Get editable settings configuration for UI editing.
+
+**Description:**
+Returns all settings that can be edited via the web UI, along with feature flags and migration status. Only available when `SETTINGS_EDIT_VIA_UI_ENABLED=true`.
+
+**Authentication:** Required
+
+**Response:**
+```json
+{
+  "settings_edit_via_ui_enabled": true,
+  "settings_migrated": true,
+  "configuration": {
+    "mailcow_url": "https://mail.example.com",
+    "mailcow_api_key": "********",
+    "mailcow_api_timeout": 30,
+    "mailcow_api_verify_ssl": true,
+    "fetch_interval": 60,
+    "fetch_count_postfix": 2000,
+    "fetch_count_rspamd": 500,
+    "fetch_count_netfilter": 500,
+    "retention_days": 7,
+    "max_correlation_age_minutes": 10,
+    "correlation_check_interval": 120,
+    "app_port": 8080,
+    "log_level": "WARNING",
+    "app_title": "mailcow Logs Viewer",
+    "app_logo_url": "",
+    "debug": false,
+    "max_search_results": 1000,
+    "csv_export_limit": 10000,
+    "scheduler_workers": 4,
+    "blacklist_emails": "archive@example.com,monitor@example.com",
+    "basic_auth_enabled": true,
+    "auth_username": "admin",
+    "auth_password": "********",
+    "oauth2_enabled": false,
+    "admin_email": "admin@example.com",
+    "blacklist_alert_email": "alerts@example.com",
+    "dmarc_error_email": "dmarc@example.com",
+    "smtp_enabled": true,
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "smtp_use_tls": true,
+    "smtp_use_ssl": false,
+    "smtp_user": "noreply@example.com",
+    "smtp_password": "********",
+    "smtp_from": "noreply@example.com",
+    "smtp_relay_mode": false,
+    "maxmind_account_id": "123456",
+    "maxmind_license_key": "********",
+    "dmarc_retention_days": 60,
+    "dmarc_manual_upload_enabled": true,
+    "dmarc_allow_report_delete": false,
+    "enable_weekly_summary": true,
+    "dmarc_imap_enabled": true,
+    "dmarc_imap_host": "imap.gmail.com",
+    "dmarc_imap_port": 993,
+    "dmarc_imap_use_ssl": true,
+    "dmarc_imap_user": "dmarc@example.com",
+    "dmarc_imap_password": "********",
+    "dmarc_imap_folder": "INBOX",
+    "dmarc_imap_delete_after": true,
+    "dmarc_imap_interval": 3600,
+    "dmarc_imap_run_on_startup": true,
+    "dmarc_imap_batch_size": 10
+  },
+  "env_differs": {
+    "mailcow_url": {
+      "env": "https://old.example.com",
+      "db": "https://mail.example.com"
+    }
+  }
+}
+```
+
+**Response Fields:**
+- `settings_edit_via_ui_enabled`: Boolean indicating if UI editing is enabled
+- `settings_migrated`: Boolean indicating if settings have been migrated from ENV to DB
+- `configuration`: Dictionary of all editable settings (sensitive fields are masked with `********`)
+- `env_differs`: Dictionary of settings where ENV variable differs from DB value (only shown when `settings_migrated=true`)
+
+**Sensitive Fields (Masked):**
+- `mailcow_api_key`
+- `auth_password`
+- `oauth2_client_secret`
+- `smtp_password`
+- `dmarc_imap_password`
+- `session_secret_key`
+- `maxmind_license_key`
+
+**Notes:**
+- Automatically reloads settings from database if UI editing is enabled
+- Sensitive fields are masked with `********` in responses
+- Empty sensitive fields are returned as empty string `""`
+- `env_differs` helps identify which ENV variables should be removed after migration
+- Only editable settings are included (PostgreSQL database settings are excluded)
+
+---
+
+### PUT /api/settings
+
+Update settings from web UI.
+
+**Description:**
+Updates application settings stored in database. Only available when `SETTINGS_EDIT_VIA_UI_ENABLED=true`. Settings are validated before saving, and all components (including MailcowAPI) are automatically reloaded.
+
+**Authentication:** Required
+
+**Request Body:**
+```json
+{
+  "mailcow_url": "https://mail.example.com",
+  "mailcow_api_key": "new-api-key-here",
+  "fetch_interval": 120,
+  "retention_days": 14,
+  "smtp_enabled": true,
+  "smtp_host": "smtp.example.com",
+  "smtp_port": 587,
+  "smtp_user": "noreply@example.com",
+  "smtp_password": "new-password",
+  "admin_email": "admin@example.com"
+}
+```
+
+**Request Fields:**
+- Any editable setting key (see `GET /api/settings` for full list)
+- Sensitive fields: Send empty string `""` to keep current value unchanged
+- Non-sensitive fields: Send `null` or omit to use default value
+
+**Response:**
+```json
+{
+  "settings_edit_via_ui_enabled": true,
+  "settings_migrated": true,
+  "configuration": {
+    "mailcow_url": "https://mail.example.com",
+    "mailcow_api_key": "********",
+    "fetch_interval": 120,
+    "retention_days": 14,
+    "smtp_enabled": true,
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "smtp_user": "noreply@example.com",
+    "smtp_password": "********",
+    "admin_email": "admin@example.com"
+  }
+}
+```
+
+**Error Responses:**
+
+**403 Forbidden** (UI editing disabled):
+```json
+{
+  "detail": "Editing settings from UI is disabled. Set SETTINGS_EDIT_VIA_UI_ENABLED=true to enable."
+}
+```
+
+**400 Bad Request** (Validation error):
+```json
+{
+  "detail": "Validation error: 1 validation error for Settings\nmailcow_url\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]"
+}
+```
+
+**Notes:**
+- Only editable settings are accepted (PostgreSQL settings are filtered out)
+- Settings are validated using Pydantic before saving
+- Empty strings for sensitive fields are ignored (keeps current value)
+- Settings are automatically reloaded after saving
+- MailcowAPI configuration is automatically updated
+- Returns updated configuration with masked sensitive fields
+
+---
+
+### POST /api/settings/import-from-env
+
+Import current configuration from environment variables to database.
+
+**Description:**
+Migrates all current effective settings (from defaults + ENV + existing DB) into database. This allows users to transition from ENV-only management to UI management. After migration, ENV variables can be removed (except `SETTINGS_EDIT_VIA_UI_ENABLED`).
+
+**Authentication:** Required
+
+**Response:**
+```json
+{
+  "message": "Configuration imported from current environment into DB.",
+  "settings_edit_via_ui_enabled": true,
+  "settings_migrated": true,
+  "configuration": {
+    "mailcow_url": "https://mail.example.com",
+    "mailcow_api_key": "********",
+    "fetch_interval": 60,
+    "retention_days": 7
+  },
+  "env_differs": {
+    "mailcow_url": {
+      "env": "https://old.example.com",
+      "db": "https://mail.example.com"
+    }
+  }
+}
+```
+
+**Response Fields:**
+- `message`: Success message
+- `settings_edit_via_ui_enabled`: Always `true` (only available when enabled)
+- `settings_migrated`: Always `true` after import
+- `configuration`: Updated configuration with masked sensitive fields
+- `env_differs`: Dictionary showing which settings differ between ENV and DB (helps identify which ENV vars to remove)
+
+**Error Responses:**
+
+**403 Forbidden** (UI editing disabled):
+```json
+{
+  "detail": "Editing settings from UI is disabled. Set SETTINGS_EDIT_VIA_UI_ENABLED=true to enable."
+}
+```
+
+**Notes:**
+- Imports all editable settings from current effective configuration
+- Settings are automatically reloaded after import
+- MailcowAPI configuration is automatically updated
+- `env_differs` helps identify which ENV variables should be removed
+- After migration, settings are managed via UI and stored in database
+- `SETTINGS_EDIT_VIA_UI_ENABLED` must remain in ENV (not stored in DB)
 
 ---
 

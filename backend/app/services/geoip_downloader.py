@@ -12,9 +12,20 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# Configuration from environment
-MAXMIND_LICENSE_KEY = os.getenv('MAXMIND_LICENSE_KEY', '')
-MAXMIND_ACCOUNT_ID = os.getenv('MAXMIND_ACCOUNT_ID', '')
+# Import settings (will use DB overrides if SETTINGS_EDIT_VIA_UI_ENABLED is true)
+from ..config import settings
+
+# Configuration from settings (supports DB overrides)
+def get_maxmind_license_key() -> str:
+    """Get MaxMind license key from settings (supports DB overrides)"""
+    return settings.maxmind_license_key or ''
+
+def get_maxmind_account_id() -> str:
+    """Get MaxMind account ID from settings (supports DB overrides)"""
+    return settings.maxmind_account_id or ''
+
+MAXMIND_LICENSE_KEY = get_maxmind_license_key()
+MAXMIND_ACCOUNT_ID = get_maxmind_account_id()
 GEOIP_DB_DIR = os.getenv('GEOIP_DB_DIR', '/app/data')
 
 # Database paths
@@ -44,7 +55,10 @@ DATABASES = {
 
 def is_license_configured() -> bool:
     """Check if MaxMind license key is configured"""
-    return bool(MAXMIND_LICENSE_KEY and MAXMIND_ACCOUNT_ID)
+    # Reload from settings to get latest values (including DB overrides)
+    license_key = get_maxmind_license_key()
+    account_id = get_maxmind_account_id()
+    return bool(license_key and account_id)
 
 
 def get_db_age_days(db_path: str) -> int:
@@ -103,10 +117,18 @@ def download_single_database(db_name: str) -> bool:
         logger.info(f"Downloading GeoLite2-{db_name} database from MaxMind...")
         logger.info(f"  ({db_info['description']})")
         
+        # Get latest license key from settings (supports DB overrides)
+        license_key = get_maxmind_license_key()
+        account_id = get_maxmind_account_id()
+        
+        if not license_key or not account_id:
+            logger.error("MaxMind license key or account ID not configured")
+            return False
+        
         # Construct download URL
         params = {
             'edition_id': db_info['edition_id'],
-            'license_key': MAXMIND_LICENSE_KEY,
+            'license_key': license_key,
             'suffix': 'tar.gz'
         }
         

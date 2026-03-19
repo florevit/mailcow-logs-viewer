@@ -279,8 +279,8 @@ async function handleLogin(event) {
         // Save credentials
         saveAuthCredentials(username, password);
 
-        // Test authentication with a simple API call
-        const response = await authenticatedFetch('/api/info');
+        // Test authentication (use /api/auth/verify so wrong credentials return 401)
+        const response = await authenticatedFetch('/api/auth/verify');
 
         if (response.ok) {
             // Success - redirect to main app
@@ -289,11 +289,11 @@ async function handleLogin(event) {
             throw new Error('Authentication failed');
         }
     } catch (error) {
-        // Show error
+        // Show error (always show user-friendly message for failed login)
         if (errorDiv) {
             errorDiv.classList.remove('hidden');
             if (errorText) {
-                errorText.textContent = error.message || 'Invalid username or password';
+                errorText.textContent = 'Invalid username or password';
             }
         }
 
@@ -1053,12 +1053,25 @@ async function smartRefreshSettings() {
         if (!response.ok) return;
 
         const data = await response.json();
+        if (data.settings_edit_via_ui_enabled && !data.editable_config) {
+            try {
+                const editableRes = await authenticatedFetch('/api/settings');
+                if (editableRes.ok) {
+                    const editableData = await editableRes.json();
+                    data.editable_config = editableData.configuration || {};
+                }
+            } catch (e) { /* ignore */ }
+        }
 
         if (hasDataChanged(data, 'settings')) {
+            const content = document.getElementById('settings-content');
+            if (content && !content.classList.contains('hidden') && content.querySelector('#settings-edit-form')) {
+                // User is on Settings tab with edit form open – skip auto-refresh to avoid interrupting (e.g. switching tabs)
+                return;
+            }
             console.log('[REFRESH] Settings data changed, updating UI');
             lastDataCache.settings = data;
 
-            const content = document.getElementById('settings-content');
             if (content && !content.classList.contains('hidden')) {
                 // Preserve version info from cache (don't reload it on smart refresh)
                 if (versionInfoCache.app_version) {
@@ -2780,6 +2793,7 @@ function renderStatusJobs(jobs) {
             ${renderJobCard('Update Final Status', 'update_final_status', jobs.update_final_status)}
             ${renderJobCard('Expire Correlations', 'expire_correlations', jobs.expire_correlations)}
             ${renderJobCard('Cleanup Logs', 'cleanup_logs', jobs.cleanup_logs)}
+            ${renderJobCard('Cleanup DMARC Reports', 'cleanup_dmarc_reports', jobs.cleanup_dmarc_reports)}
             ${renderJobCard('Check App Version', 'check_app_version', jobs.check_app_version)}
             ${renderJobCard('DNS Check (All Domains)', 'dns_check', jobs.dns_check)}
             ${renderJobCard('Sync Active Domains', 'sync_local_domains', jobs.sync_local_domains)}
@@ -4682,6 +4696,168 @@ function formatBytes(bytes) {
 // SETTINGS PAGE
 // =============================================================================
 
+// Per-field descriptions (from env.example comments)
+var SETTINGS_FIELD_DESCRIPTIONS = {
+    mailcow_url: 'Your mailcow instance URL (without trailing slash).',
+    mailcow_api_key: 'mailcow API key. Generate from System → API in mailcow admin. Required permissions: Read access to logs.',
+    mailcow_api_timeout: 'API request timeout in seconds.',
+    mailcow_api_verify_ssl: 'Verify SSL certificates when connecting to mailcow API. Set to false for development with self-signed certificates. Default: true.',
+    fetch_interval: 'Seconds between log fetches from mailcow. Lower = more frequent updates, higher load. Default: 60.',
+    fetch_count_postfix: 'Postfix logs to fetch per request. Recommended: 500 for most servers; increase for high volume. Default: 2000.',
+    fetch_count_rspamd: 'Rspamd logs to fetch per request. Default: 500.',
+    fetch_count_netfilter: 'Netfilter logs to fetch per request. Default: 500.',
+    retention_days: 'Days to keep logs in database. Older logs are automatically deleted. Recommended: 7 for most, 30 for compliance. Default: 7.',
+    max_correlation_age_minutes: 'Stop searching for correlations older than this (minutes).',
+    correlation_check_interval: 'Seconds between correlation completion checks. Default: 120.',
+    app_port: 'Application port (internal container port). Default: 8080.',
+    log_level: 'Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default: WARNING.',
+    tz: 'Timezone for log display (e.g. Europe/London, America/New_York). Default: UTC.',
+    app_title: 'Application title (shown in browser tab).',
+    app_logo_url: 'Logo URL (optional; leave empty for no logo).',
+    debug: 'Enable debug mode (shows detailed errors). Use only for development. Never enable in production. Default: false.',
+    max_search_results: 'Maximum records to return in search results. Default: 1000.',
+    csv_export_limit: 'CSV export row limit. Default: 10000.',
+    scheduler_workers: 'Thread pool size for blocking scheduler jobs (e.g. DMARC IMAP sync). Valid range: 1–64. Default: 4.',
+    blacklist_emails: 'Comma-separated email addresses to hide from logs (e.g. BCC archive, monitoring). These emails are NOT stored in the database.',
+    auth_enabled: 'Deprecated: use Basic auth enabled. When enabled, enables Basic Auth. Default: false.',
+    basic_auth_enabled: 'Enable Basic HTTP authentication. When enabled, ALL pages and API require login. Default: false.',
+    auth_username: 'Basic auth username. Default: admin.',
+    auth_password: 'Basic auth password (required if Basic auth enabled). Leave empty to disable. Use a strong password in production.',
+    oauth2_enabled: 'Enable OAuth2/OIDC authentication. Works with Mailcow, Keycloak, etc. Default: false.',
+    oauth2_provider_name: 'Display name for the OAuth2 provider (e.g. Mailcow, Keycloak).',
+    oauth2_issuer_url: 'OIDC Discovery: set issuer URL and endpoints are auto-discovered. Mailcow: https://mail.example.com. Keycloak: https://keycloak.example.com/realms/myrealm',
+    oauth2_authorization_url: 'Manual: OAuth2 authorization endpoint (if discovery not supported).',
+    oauth2_token_url: 'Manual: OAuth2 token endpoint.',
+    oauth2_userinfo_url: 'Manual: OAuth2 UserInfo endpoint.',
+    oauth2_client_id: 'OAuth2 Client ID from your provider.',
+    oauth2_client_secret: 'OAuth2 Client Secret from your provider.',
+    oauth2_redirect_uri: 'OAuth2 Redirect URI (callback). Must match the URI configured in your OAuth2 provider.',
+    oauth2_scopes: 'OAuth2 scopes to request. Default: openid profile email.',
+    oauth2_use_oidc_discovery: 'Enable OIDC discovery (uses .well-known/openid-configuration). Default: true.',
+    session_secret_key: 'Secret key for signing session cookies. REQUIRED if OAuth2 enabled. Generate: openssl rand -hex 32. Use a strong secret in production.',
+    session_expiry_hours: 'Session expiration in hours. Default: 24.',
+    smtp_enabled: 'Enable SMTP for sending notifications (alerts, weekly summary).',
+    smtp_host: 'SMTP server hostname.',
+    smtp_port: 'SMTP server port (587 for TLS, 465 for SSL, 25 for plain).',
+    smtp_use_tls: 'Use STARTTLS for SMTP. Recommended.',
+    smtp_use_ssl: 'Use implicit SSL for SMTP (usually port 465).',
+    smtp_user: 'SMTP username (usually email address).',
+    smtp_password: 'SMTP password.',
+    smtp_from: 'From address for emails (defaults to SMTP user if not set).',
+    smtp_relay_mode: 'Relay mode: for local relay servers that do not require authentication. When enabled, username and password are not required.',
+    admin_email: 'Administrator email for system notifications.',
+    blacklist_alert_email: 'Email for IP blacklist alerts (uses Admin email if not set).',
+    dmarc_retention_days: 'DMARC reports retention in days. Default: 60.',
+    dmarc_manual_upload_enabled: 'Allow manual upload of DMARC reports via the UI. Default: true.',
+    dmarc_allow_report_delete: 'Allow deleting DMARC/TLS reports from the UI. Default: false.',
+    enable_weekly_summary: 'Enable weekly summary email report (sent to admin email). Default: true.',
+    dmarc_imap_enabled: 'Enable automatic DMARC report import from IMAP mailbox.',
+    dmarc_imap_host: 'IMAP server hostname (e.g. imap.gmail.com).',
+    dmarc_imap_port: 'IMAP server port (993 for SSL, 143 for non-SSL). Default: 993.',
+    dmarc_imap_use_ssl: 'Use SSL/TLS for IMAP connection. Default: true.',
+    dmarc_imap_user: 'IMAP username (email address).',
+    dmarc_imap_password: 'IMAP password.',
+    dmarc_imap_folder: 'IMAP folder to scan for DMARC reports. Default: INBOX.',
+    dmarc_imap_delete_after: 'Delete emails after successful processing. Default: true.',
+    dmarc_imap_interval: 'Interval between IMAP syncs in seconds. Default: 3600 (1 hour).',
+    dmarc_imap_run_on_startup: 'Run IMAP sync once on application startup. Default: true.',
+    dmarc_imap_batch_size: 'Number of emails to process per batch. Default: 10.',
+    dmarc_error_email: 'Email for DMARC error notifications (defaults to Admin email if not set).',
+    maxmind_account_id: 'MaxMind Account ID for GeoIP database downloads. Required to download GeoLite2 databases.',
+    maxmind_license_key: 'MaxMind License Key for GeoIP database downloads. Required to download GeoLite2 databases. Keep this secret.'
+};
+
+// Edit form tabs (same order as env.example sections) with descriptions from env.example
+// Keys grouped logically within each tab
+var SETTINGS_EDIT_TABS = [
+    { id: 'mailcow', label: 'Mailcow', description: 'Your mailcow instance URL and API credentials. API key needs read access to logs (generate from System → API in mailcow admin). Set verify SSL to false only for development with self-signed certificates.', groups: [
+        { label: 'Connection', keys: ['mailcow_url', 'mailcow_api_key'] },
+        { label: 'Advanced', keys: ['mailcow_api_timeout', 'mailcow_api_verify_ssl'] }
+    ]},
+    { id: 'fetch', label: 'Fetch', description: 'How often to fetch logs from mailcow and how many records per request. Lower interval = more frequent updates, higher load. Retention: how many days to keep logs in the database (older logs are deleted).', groups: [
+        { label: 'Timing', keys: ['fetch_interval'] },
+        { label: 'Counts per Request', keys: ['fetch_count_postfix', 'fetch_count_rspamd', 'fetch_count_netfilter'] },
+        { label: 'Retention', keys: ['retention_days'] }
+    ]},
+    { id: 'correlation', label: 'Correlation', description: 'Correlation links Postfix logs to messages. Max age: stop searching for correlations older than this (minutes). Check interval: how often to run the correlation job (seconds).', groups: [
+        { label: 'Settings', keys: ['max_correlation_age_minutes', 'correlation_check_interval'] }
+    ]},
+    { id: 'application', label: 'Application', description: 'Web app port, title and logo. Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL. Debug mode shows detailed errors (do not enable in production). Search/CSV limits and scheduler worker count.', groups: [
+        { label: 'Basic', keys: ['app_port', 'app_title', 'app_logo_url'] },
+        { label: 'Logging', keys: ['log_level', 'debug'] },
+        { label: 'Limits', keys: ['max_search_results', 'csv_export_limit', 'scheduler_workers'] }
+    ]},
+    { id: 'blacklist', label: 'Blacklist', description: 'Comma-separated email addresses to hide from logs (e.g. BCC archive, monitoring addresses). These emails are not stored in the database.', groups: [
+        { label: 'Settings', keys: ['blacklist_emails'] }
+    ]},
+    { id: 'auth', label: 'Authentication', description: 'Basic HTTP authentication. When enabled, all pages and API require login. Use a strong password in production.', groups: [
+        { label: 'Basic Auth', keys: ['basic_auth_enabled', 'auth_username', 'auth_password'] }
+    ]},
+    { id: 'oauth2', label: 'OAuth2', description: 'OAuth2/OIDC login (e.g. Mailcow, Keycloak). Set issuer URL for auto-discovery, or set authorization/token/userinfo URLs manually. Session secret is required when OAuth2 is enabled; session expiry is in hours.', groups: [
+        { label: 'Enable', keys: ['oauth2_enabled'] },
+        { label: 'Provider', keys: ['oauth2_provider_name'] },
+        { label: 'Discovery (Auto)', keys: ['oauth2_issuer_url', 'oauth2_use_oidc_discovery'] },
+        { label: 'Endpoints (Manual)', keys: ['oauth2_authorization_url', 'oauth2_token_url', 'oauth2_userinfo_url'] },
+        { label: 'Credentials', keys: ['oauth2_client_id', 'oauth2_client_secret', 'oauth2_redirect_uri', 'oauth2_scopes'] },
+        { label: 'Session', keys: ['session_secret_key', 'session_expiry_hours'] }
+    ]},
+    { id: 'smtp', label: 'SMTP', description: 'SMTP for sending notifications (alerts, weekly summary). Relay mode: for local relay servers that do not require authentication (only host and from address needed).', groups: [
+        { label: 'Enable', keys: ['smtp_enabled'] },
+        { label: 'Server', keys: ['smtp_host', 'smtp_port'] },
+        { label: 'Security', keys: ['smtp_use_tls', 'smtp_use_ssl'] },
+        { label: 'Authentication', keys: ['smtp_user', 'smtp_password', 'smtp_relay_mode'] },
+        { label: 'From Address', keys: ['smtp_from'] }
+    ]},
+    { id: 'notifications', label: 'Alerts', description: 'Email addresses for system notifications and alerts. Admin email is used for general notifications; other emails override for specific alert types.', groups: [
+        { label: 'Addresses', keys: ['admin_email', 'blacklist_alert_email', 'dmarc_error_email', 'enable_weekly_summary'] }
+    ]},
+    { id: 'dmarc', label: 'DMARC', description: 'DMARC reports retention (days). Allow manual upload of reports via UI. Allow deleting DMARC/TLS reports from the UI. Weekly summary: enable email report sent to admin.', groups: [
+        { label: 'Retention', keys: ['dmarc_retention_days'] },
+        { label: 'Features', keys: ['dmarc_manual_upload_enabled', 'dmarc_allow_report_delete'] }
+    ]},
+    { id: 'dmarc_imap', label: 'DMARC IMAP', description: 'Automatically import DMARC reports from an IMAP mailbox. Set host, port, user, password and folder (e.g. INBOX). Delete after: remove emails after processing. Interval in seconds; run on startup to sync once at start.', groups: [
+        { label: 'Enable', keys: ['dmarc_imap_enabled'] },
+        { label: 'Connection', keys: ['dmarc_imap_host', 'dmarc_imap_port', 'dmarc_imap_use_ssl'] },
+        { label: 'Authentication', keys: ['dmarc_imap_user', 'dmarc_imap_password'] },
+        { label: 'Settings', keys: ['dmarc_imap_folder', 'dmarc_imap_delete_after', 'dmarc_imap_interval', 'dmarc_imap_run_on_startup', 'dmarc_imap_batch_size'] }
+    ]},
+    { id: 'maxmind', label: 'MaxMind', description: 'MaxMind GeoIP database configuration for IP geolocation. Account ID and License Key are required to download GeoLite2 databases. Status shows whether databases are configured and up to date.', groups: [
+        { label: 'Credentials', keys: ['maxmind_account_id', 'maxmind_license_key'] },
+        { label: 'Status', keys: [] }  // Status will be displayed separately, not as editable field
+    ]}
+];
+
+function renderSettingsEditField(key, value, sensitiveKeys, description, envDiffers) {
+    const isBool = typeof value === 'boolean';
+    const isNum = typeof value === 'number';
+    const sensitive = sensitiveKeys.includes(key);
+    const displayVal = value === null || value === undefined ? '' : (isBool ? value : String(value));
+    // Convert key to label with proper acronym capitalization (SSL, IMAP, TLS, etc.)
+    let label = key.replace(/_/g, ' ').replace(/\b\w/g, function(l) { return l.toUpperCase(); });
+    // Fix common acronyms
+    label = label.replace(/\bSsl\b/gi, 'SSL').replace(/\bImap\b/gi, 'IMAP').replace(/\bTls\b/gi, 'TLS')
+        .replace(/\bOauth\b/gi, 'OAuth').replace(/\bOidc\b/gi, 'OIDC').replace(/\bApi\b/gi, 'API')
+        .replace(/\bUrl\b/gi, 'URL').replace(/\bIp\b/gi, 'IP').replace(/\bDns\b/gi, 'DNS')
+        .replace(/\bDmarc\b/gi, 'DMARC').replace(/\bSpf\b/gi, 'SPF').replace(/\bDkim\b/gi, 'DKIM')
+        .replace(/\bSmtp\b/gi, 'SMTP').replace(/\bCsv\b/gi, 'CSV').replace(/\bEnv\b/gi, 'ENV')
+        .replace(/\bDb\b/gi, 'DB');
+    const descHtml = (description && description.trim()) ? '<p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 mb-1">' + escapeHtml(description) + '</p>' : '';
+    const warningHtml = envDiffers ? '<p class="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1"><svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path></svg>This value differs from ENV. Remove the ENV variable to use the DB value.</p>' : '';
+    if (isBool) {
+        return '<div class="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-700/30 rounded">' +
+            '<input type="checkbox" id="edit-' + key + '" name="' + key + '" ' + (displayVal ? 'checked' : '') + ' class="rounded border-gray-300 dark:border-gray-600">' +
+            '<div><label for="edit-' + key + '" class="text-sm font-medium text-gray-700 dark:text-gray-300">' + escapeHtml(label) + '</label>' + descHtml + warningHtml + '</div></div>';
+    }
+    const inputType = sensitive ? 'password' : (isNum ? 'number' : 'text');
+    const placeholder = sensitive ? 'Leave empty to keep current' : '';
+    const valAttr = (isBool ? '' : displayVal);
+    return '<div><label for="edit-' + key + '" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">' + escapeHtml(label) + '</label>' +
+        descHtml +
+        '<input type="' + inputType + '" id="edit-' + key + '" name="' + key + '" value="' + escapeHtml(valAttr) + '" placeholder="' + escapeHtml(placeholder) + '" ' +
+        'class="w-full rounded border ' + (envDiffers ? 'border-amber-300 dark:border-amber-600' : 'border-gray-300 dark:border-gray-600') + ' bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-3 py-2 text-sm">' +
+        warningHtml + '</div>';
+}
+
 async function loadSettings() {
     const loading = document.getElementById('settings-loading');
     const content = document.getElementById('settings-content');
@@ -4703,6 +4879,20 @@ async function loadSettings() {
         }
 
         const data = await settingsResponse.json();
+
+        // Always fetch GET /api/settings so we have the UI-edit flag and editable_config (in case /info omits them or env just enabled)
+        try {
+            const editableRes = await authenticatedFetch('/api/settings');
+            if (editableRes.ok) {
+                const editableData = await editableRes.json();
+                if (data.settings_edit_via_ui_enabled === undefined) data.settings_edit_via_ui_enabled = editableData.settings_edit_via_ui_enabled;
+                if (data.settings_edit_via_ui_enabled && !data.editable_config) data.editable_config = editableData.configuration || {};
+                if (editableData.settings_migrated !== undefined) data.settings_migrated = editableData.settings_migrated;
+                if (editableData.env_differs) data.env_differs = editableData.env_differs;
+            }
+        } catch (e) {
+            console.warn('Could not load editable settings:', e);
+        }
 
         // Use cached version info if available to show page immediately
         if (versionInfoCache.app_version) {
@@ -4914,7 +5104,7 @@ function renderSettings(content, data) {
             <div class="p-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Current Version</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Current Version</p>
                         <div class="flex items-center gap-2">
                             <p id="current-version-text" class="text-lg font-semibold text-gray-900 dark:text-white cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors" title="Click to view changelog">v${appVersion}</p>
                             <svg class="w-4 h-4 text-blue-500 dark:text-blue-400 cursor-pointer" fill="none" stroke="currentColor" viewBox="0 0 24 24" title="Click to view changelog">
@@ -4923,7 +5113,7 @@ function renderSettings(content, data) {
                         </div>
                     </div>
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Latest Version</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Latest Version</p>
                         <div class="flex items-center gap-2 flex-wrap">
                             <p class="text-lg font-semibold text-gray-900 dark:text-white">${versionInfo.latest_version ? `v${versionInfo.latest_version}` : 'Checking...'}</p>
                             ${versionInfo.last_checked ? `
@@ -4982,11 +5172,11 @@ function renderSettings(content, data) {
             <div class="p-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">mailcow URL</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">mailcow URL</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1 font-mono break-all">${escapeHtml(config.mailcow_url || 'N/A')}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Server IP</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Server IP</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1 font-mono">
                             ${config.server_ip ?
             `<span class="inline-flex items-center gap-1.5">
@@ -5000,7 +5190,7 @@ function renderSettings(content, data) {
                         </p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Authentication</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Authentication</p>
                         ${config.auth_enabled ?
             `<div class="space-y-2">
                                 <div class="flex items-center gap-2 flex-wrap">
@@ -5031,7 +5221,7 @@ function renderSettings(content, data) {
         }
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg ${config.local_domains && config.local_domains.length > 0 ? 'col-span-1 md:col-span-2 lg:col-span-3' : ''}">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">
                             Local Domains
                             ${config.local_domains && config.local_domains.length > 0 ?
             `<span class="ml-1 text-gray-400 dark:text-gray-500 font-normal">(${config.local_domains.length})</span>` :
@@ -5051,60 +5241,161 @@ function renderSettings(content, data) {
             '<p class="text-sm text-gray-500 dark:text-gray-400 mt-1">N/A</p>'
         }
                     </div>
+                    ${!data.settings_edit_via_ui_enabled ? `
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Fetch Interval</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Fetch Interval</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.fetch_interval || 0} seconds</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Fetch Count (Postfix)</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Fetch Count (Postfix)</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.fetch_count_postfix || config.fetch_count || 0} per request</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Fetch Count (Rspamd)</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Fetch Count (Rspamd)</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.fetch_count_rspamd || config.fetch_count || 0} per request</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Fetch Count (Netfilter)</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Fetch Count (Netfilter)</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.fetch_count_netfilter || config.fetch_count || 0} per request</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Retention</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Retention</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.retention_days || 0} days</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Max Correlation Age</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Max Correlation Age</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.max_correlation_age_minutes || 10} minutes</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Correlation Check</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Correlation Check</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.correlation_check_interval || 120} seconds</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Timezone</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Timezone</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${escapeHtml(config.timezone || 'N/A')}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Log Level</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Log Level</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.log_level || 'INFO'}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Blacklist</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Blacklist</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.blacklist_enabled ? `Enabled (${config.blacklist_count} emails)` : 'Disabled'}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Scheduler Workers</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">Scheduler Workers</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">${config.scheduler_workers || 4}</p>
                     </div>
                     <div class="p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">MaxMind Status</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400">MaxMind Status</p>
                         <p class="text-sm text-gray-900 dark:text-white mt-1">
                             ${renderMaxMindStatus(data.configuration.maxmind_status)}
                         </p>
                     </div>
+                    ` : ''}
                 </div>
             </div>
         </div>
 
+        ${data.settings_edit_via_ui_enabled && data.editable_config ? (function() {
+            const sensitiveKeys = ['mailcow_api_key','auth_password','oauth2_client_secret','smtp_password','dmarc_imap_password','session_secret_key','maxmind_license_key'];
+            const envDiffers = data.env_differs || {};
+            const allAssignedKeys = new Set(SETTINGS_EDIT_TABS.flatMap(function(t){ return (t.groups || []).flatMap(function(g){ return g.keys; }); }));
+            const configKeys = Object.keys(data.editable_config);
+            const otherKeys = configKeys.filter(function(k){ return !allAssignedKeys.has(k); });
+            const tabs = otherKeys.length ? SETTINGS_EDIT_TABS.concat([{ id: 'other', label: 'Other', groups: [{ label: 'Settings', keys: otherKeys }] }]) : SETTINGS_EDIT_TABS;
+            let tabsHtml = '<div class="flex flex-wrap gap-1 border-b border-gray-200 dark:border-gray-700 mb-4">';
+            tabs.forEach(function(tab, idx) {
+                const allKeysInTab = (tab.groups || []).flatMap(function(g){ return g.keys; });
+                const keysInTab = allKeysInTab.filter(function(k){ return data.editable_config[k] !== undefined; });
+                if (keysInTab.length === 0 && tab.id !== 'maxmind') return;
+                const active = idx === 0 ? ' bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-b-2 border-blue-500' : ' text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700';
+                tabsHtml += '<button type="button" class="settings-edit-tab px-3 py-2 text-sm font-medium rounded-t border-b-2 border-transparent' + active + '" data-tab="' + tab.id + '">' + escapeHtml(tab.label) + '</button>';
+            });
+            tabsHtml += '</div><div class="space-y-6">';
+            tabs.forEach(function(tab, idx) {
+                const allKeysInTab = (tab.groups || []).flatMap(function(g){ return g.keys; });
+                const keysInTab = allKeysInTab.filter(function(k){ return data.editable_config[k] !== undefined; });
+                // Show tab if it has keys OR if it's maxmind tab (which shows status)
+                if (keysInTab.length === 0 && tab.id !== 'maxmind') return;
+                const hidden = idx !== 0 ? ' hidden' : '';
+                const desc = tab.description ? '<p class="text-sm text-gray-500 dark:text-gray-400 mb-4">' + escapeHtml(tab.description) + '</p>' : '';
+                tabsHtml += '<div id="settings-tab-panel-' + tab.id + '" class="settings-edit-panel' + hidden + '">' + desc;
+                
+                // Special handling for SMTP tab - add Global SMTP Configuration
+                if (tab.id === 'smtp' && data.smtp_configuration) {
+                    tabsHtml += '<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg"><h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Status</h4><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+                    tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">SMTP Enabled</p><div class="flex items-center gap-2 flex-wrap">';
+                    tabsHtml += data.smtp_configuration.enabled ? '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"><svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>Enabled</span>' : '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">Disabled</span>';
+                    tabsHtml += '<button onclick="testSmtpConnection()" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors duration-200 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg><span>Test SMTP</span></button></div></div>';
+                    if (data.smtp_configuration.enabled) {
+                        tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Server</p><p class="text-sm text-gray-900 dark:text-white font-mono">' + escapeHtml(data.smtp_configuration.host) + ':' + escapeHtml(data.smtp_configuration.port) + '</p></div>';
+                        tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Admin Email</p><p class="text-sm text-gray-900 dark:text-white font-mono">' + escapeHtml(data.smtp_configuration.admin_email || 'N/A') + '</p></div>';
+                    }
+                    tabsHtml += '</div></div>';
+                }
+                
+                // Special handling for DMARC IMAP tab - add DMARC Management
+                if (tab.id === 'dmarc_imap' && data.dmarc_configuration) {
+                    tabsHtml += '<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg"><h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Status</h4><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">';
+                    tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">IMAP Auto-Import</p><div class="flex items-center gap-2 flex-wrap">';
+                    tabsHtml += data.dmarc_configuration.imap_sync_enabled ? '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"><svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>Enabled</span>' : '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400">Disabled</span>';
+                    tabsHtml += '<button onclick="testImapConnection()" class="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-xs font-medium transition-colors duration-200 flex items-center gap-1.5"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg><span>Test IMAP</span></button></div></div>';
+                    tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Manual Upload</p><p class="text-sm text-gray-900 dark:text-white">';
+                    tabsHtml += data.dmarc_configuration.manual_upload_enabled ? '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"><svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>Enabled</span>' : '<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">Disabled</span>';
+                    tabsHtml += '</p></div>';
+                    if (data.dmarc_configuration.imap_sync_enabled) {
+                        tabsHtml += '<div class="p-4 bg-white dark:bg-gray-800 rounded-lg"><p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">IMAP Server</p><p class="text-sm text-gray-900 dark:text-white font-mono">' + escapeHtml(data.dmarc_configuration.imap_host || 'N/A') + '</p></div>';
+                    }
+                    tabsHtml += '</div></div>';
+                }
+                
+                // Special handling for MaxMind tab
+                if (tab.id === 'maxmind') {
+                    tabsHtml += '<div class="mb-6 p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg"><h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Status</h4><div class="p-4 bg-white dark:bg-gray-800 rounded-lg">';
+                    tabsHtml += '<p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">MaxMind Status</p><p class="text-sm text-gray-900 dark:text-white mt-1">' + renderMaxMindStatus(data.configuration.maxmind_status) + '</p></div></div>';
+                }
+                
+                (tab.groups || []).forEach(function(group) {
+                    const groupKeys = group.keys.filter(function(k){ return data.editable_config[k] !== undefined; });
+                    if (groupKeys.length === 0) return;
+                    tabsHtml += '<div class="mb-6"><h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">' + escapeHtml(group.label) + '</h4><div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
+                    groupKeys.forEach(function(key) {
+                        tabsHtml += renderSettingsEditField(key, data.editable_config[key], sensitiveKeys, SETTINGS_FIELD_DESCRIPTIONS[key] || '', envDiffers[key]);
+                    });
+                    tabsHtml += '</div></div>';
+                });
+                tabsHtml += '</div>';
+            });
+            tabsHtml += '</div>';
+            return `
+        <!-- Edit Configuration (only when SETTINGS_EDIT_VIA_UI_ENABLED) -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                    <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
+                    </svg>
+                    Edit configuration
+                </h3>
+                <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                    Priority: Default → ENV → DB. After importing from ENV you can remove ENV vars and manage from here.
+                </p>
+            </div>
+            <div class="p-4 space-y-4">
+                <div class="flex flex-wrap gap-2" id="settings-edit-actions">
+                    ${!data.settings_migrated ? '<button type="button" id="settings-import-env-btn" class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium transition-colors">מיגרציה של ההגדרות</button>' : ''}
+                    ${data.settings_migrated ? '<button type="submit" form="settings-edit-form" id="settings-save-btn" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm font-medium transition-colors">Save changes</button>' : ''}
+                </div>
+                <form id="settings-edit-form" class="space-y-4 pr-2">
+                    ` + tabsHtml + `
+                </form>
+            </div>
+        </div>
+        `;
+        })() : ''}
+
+        ${!data.settings_edit_via_ui_enabled ? `
         <!-- Global SMTP Configuration -->
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
             <div class="p-4 border-b border-gray-200 dark:border-gray-700">
@@ -5118,7 +5409,7 @@ function renderSettings(content, data) {
             <div class="p-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">SMTP Enabled</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">SMTP Enabled</p>
                         <div class="flex items-center gap-2 flex-wrap">
                             ${data.smtp_configuration?.enabled ?
             `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
@@ -5139,11 +5430,11 @@ function renderSettings(content, data) {
                     </div>
                     ${data.smtp_configuration?.enabled ? `
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Server</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Server</p>
                         <p class="text-sm text-gray-900 dark:text-white font-mono">${data.smtp_configuration.host}:${data.smtp_configuration.port}</p>
                     </div>
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Admin Email</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Admin Email</p>
                         <p class="text-sm text-gray-900 dark:text-white font-mono">${data.smtp_configuration.admin_email || 'N/A'}</p>
                     </div>
                     ` : ''}
@@ -5164,7 +5455,7 @@ function renderSettings(content, data) {
             <div class="p-4">
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">IMAP Auto-Import</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">IMAP Auto-Import</p>
                         <div class="flex items-center gap-2 flex-wrap">
                             ${data.dmarc_configuration?.imap_sync_enabled ?
             `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
@@ -5184,7 +5475,7 @@ function renderSettings(content, data) {
                         </div>
                     </div>
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">Manual Upload</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Manual Upload</p>
                         <p class="text-sm text-gray-900 dark:text-white">
                             ${data.dmarc_configuration?.manual_upload_enabled ?
             `<span class="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
@@ -5199,13 +5490,14 @@ function renderSettings(content, data) {
                     </div>
                     ${data.dmarc_configuration?.imap_sync_enabled ? `
                     <div class="p-4 bg-gray-50 dark:bg-gray-700/30 rounded-lg">
-                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-2">IMAP Server</p>
+                        <p class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">IMAP Server</p>
                         <p class="text-sm text-gray-900 dark:text-white font-mono">${data.dmarc_configuration.imap_host || 'N/A'}</p>
                     </div>
                     ` : ''}
                 </div>
             </div>
         </div>
+        ` : ''}
     `;
 
     // Add event listener for version number click (changelog popup)
@@ -5344,6 +5636,81 @@ function renderSettings(content, data) {
                 }, 2000);
             }
         };
+    }
+
+    // Edit configuration: form submit, Import from ENV, and tab switching
+    if (data.settings_edit_via_ui_enabled && data.editable_config) {
+        content.querySelectorAll('.settings-edit-tab').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+                const tabId = btn.getAttribute('data-tab');
+                content.querySelectorAll('.settings-edit-tab').forEach(function(b) {
+                    b.classList.remove('bg-blue-100', 'dark:bg-blue-900/40', 'text-blue-700', 'dark:text-blue-300', 'border-blue-500');
+                    b.classList.add('text-gray-600', 'dark:text-gray-400');
+                });
+                btn.classList.remove('text-gray-600', 'dark:text-gray-400');
+                btn.classList.add('bg-blue-100', 'dark:bg-blue-900/40', 'text-blue-700', 'dark:text-blue-300', 'border-b-2', 'border-blue-500');
+                content.querySelectorAll('.settings-edit-panel').forEach(function(panel) {
+                    panel.classList.add('hidden');
+                });
+                var panel = content.querySelector('#settings-tab-panel-' + tabId);
+                if (panel) panel.classList.remove('hidden');
+            });
+        });
+        const form = content.querySelector('#settings-edit-form');
+        const importBtn = content.querySelector('#settings-import-env-btn');
+        if (form) {
+            form.onsubmit = async (e) => {
+                e.preventDefault();
+                const payload = {};
+                const sensitiveKeys = ['mailcow_api_key','auth_password','oauth2_client_secret','smtp_password','dmarc_imap_password','session_secret_key','maxmind_license_key'];
+                for (const key of Object.keys(data.editable_config)) {
+                    const el = form.querySelector('[name="' + key + '"]');
+                    if (!el) continue;
+                    if (el.type === 'checkbox') {
+                        payload[key] = el.checked;
+                    } else {
+                        const val = el.value;
+                        if (sensitiveKeys.includes(key) && (val === '' || val === '********')) continue;
+                        if (typeof data.editable_config[key] === 'number') payload[key] = val === '' ? 0 : Number(val);
+                        else payload[key] = val === '' ? null : val;
+                    }
+                }
+                try {
+                    const saveBtn = content.querySelector('#settings-save-btn');
+                    if (saveBtn) saveBtn.disabled = true;
+                    const res = await authenticatedFetch('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        throw new Error(err.detail || res.statusText);
+                    }
+                    if (saveBtn) saveBtn.disabled = false;
+                    await loadSettings();
+                } catch (err) {
+                    const saveBtn = content.querySelector('#settings-save-btn');
+                    if (saveBtn) saveBtn.disabled = false;
+                    alert('Failed to save: ' + (err.message || err));
+                }
+            };
+        }
+        if (importBtn) {
+            importBtn.onclick = async () => {
+                if (!confirm('Import current configuration from ENV into DB? This will overwrite existing DB-stored values.')) return;
+                try {
+                    importBtn.disabled = true;
+                    const res = await authenticatedFetch('/api/settings/import-from-env', { method: 'POST' });
+                    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+                    const result = await res.json();
+                    if (result.env_differs && Object.keys(result.env_differs).length > 0) {
+                        data.env_differs = result.env_differs;
+                    }
+                    await loadSettings();
+                } catch (err) {
+                    alert('Import failed: ' + (err.message || err));
+                } finally {
+                    importBtn.disabled = false;
+                }
+            };
+        }
     }
 }
 
@@ -5953,6 +6320,37 @@ async function loadDomainOverview(domain, updateUrl = true) {
         const response = await authenticatedFetch(`/api/dmarc/domains/${encodeURIComponent(domain)}/overview?days=30`);
         const data = await response.json();
         const totals = data.totals || {};
+        const dmarcRecord = data.dmarc_record || null;
+
+        // Build DMARC Record card HTML (status + settings from DNS). Card and policy colors by policy level.
+        const dmarcRecordCardHtml = (() => {
+            if (!dmarcRecord) return '';
+            const settings = dmarcRecord.settings || {};
+            const policyLevel = (dmarcRecord.policy || settings.policy || 'unknown').toLowerCase();
+            const policyCardColors = { reject: 'border-green-500 bg-green-50 dark:bg-green-900/20', quarantine: 'border-amber-500 bg-amber-50 dark:bg-amber-900/20', none: 'border-red-500 bg-red-50 dark:bg-red-900/20', unknown: 'border-gray-300 bg-gray-50 dark:bg-gray-800' };
+            const policyTextColors = { reject: 'text-green-700 dark:text-green-400', quarantine: 'text-amber-700 dark:text-amber-400', none: 'text-red-700 dark:text-red-400', unknown: 'text-gray-600 dark:text-gray-400' };
+            const cardColor = policyCardColors[policyLevel] || policyCardColors.unknown;
+            const messageColor = policyTextColors[policyLevel] || policyTextColors.unknown;
+            const labels = { policy: 'Policy', subdomain_policy: 'Subdomain policy', aggregate_report_uris: 'Aggregate report URIs (rua)', forensic_report_uris: 'Forensic report URIs (ruf)', dkim_alignment: 'DKIM alignment', spf_alignment: 'SPF alignment', percentage: 'Percentage', failure_reporting_options: 'Failure reporting options' };
+            const formatVal = (v) => Array.isArray(v) ? v.join(', ') : String(v);
+            const formatUriAsEmail = (uri) => { const email = String(uri).replace(/^mailto:/i, '').trim(); return `<a href="${escapeHtml(uri)}" class="text-blue-600 dark:text-blue-400 hover:underline break-all">${escapeHtml(email)}</a>`; };
+            const policyLevelColor = (p) => policyTextColors[(String(p || '').toLowerCase())] || policyTextColors.unknown;
+            const formatCell = (k, v) => {
+                if ((k === 'aggregate_report_uris' || k === 'forensic_report_uris') && Array.isArray(v) && v.length) return v.map(formatUriAsEmail).join(', ');
+                if (k === 'policy' || k === 'subdomain_policy') return `<span class="font-semibold ${policyLevelColor(v)}">${escapeHtml(formatVal(v))}</span>`;
+                return escapeHtml(formatVal(v));
+            };
+            const settingsRows = Object.keys(labels).filter(k => settings[k] !== undefined && settings[k] !== '').map(k => `<tr class="border-b border-gray-100 dark:border-gray-700"><td class="py-1.5 pr-3 text-xs font-medium text-gray-500 dark:text-gray-400">${escapeHtml(labels[k])}</td><td class="py-1.5 text-xs text-gray-900 dark:text-gray-200 break-all">${formatCell(k, settings[k])}</td></tr>`).join('');
+            return `
+                <div class="mb-6 border ${cardColor} rounded-lg p-4">
+                    <h3 class="text-sm font-semibold text-gray-900 dark:text-white mb-2">DMARC Record</h3>
+                    <p class="text-sm ${messageColor} font-medium mb-3">${escapeHtml(dmarcRecord.message || 'No information')}</p>
+                    ${settingsRows ? `<div class="overflow-x-auto"><table class="w-full text-left"><tbody>${settingsRows}</tbody></table></div>` : ''}
+                    ${dmarcRecord.record ? `<details class="mt-3"><summary class="text-xs text-gray-600 dark:text-gray-400 cursor-pointer hover:text-gray-900 dark:hover:text-gray-200 font-medium">View Record</summary><div class="mt-2 p-2 bg-white dark:bg-gray-900 rounded border border-gray-200 dark:border-gray-700"><code class="text-xs text-gray-700 dark:text-gray-300 break-all block leading-relaxed">${escapeHtml(dmarcRecord.record)}</code></div></details>` : ''}
+                    ${(dmarcRecord.warnings && dmarcRecord.warnings.length) ? `<div class="mt-3 space-y-1">${dmarcRecord.warnings.map(w => `<div class="flex items-start gap-2 text-xs ${policyTextColors['none']}"><span>${escapeHtml(w)}</span></div>`).join('')}</div>` : ''}
+                </div>
+            `;
+        })();
 
         // Render the stats grid with 3 columns on mobile and icons
         // This replaces the old manual textContent updates
@@ -5993,6 +6391,7 @@ async function loadDomainOverview(domain, updateUrl = true) {
                         <div class="text-[9px] sm:text-xs text-gray-500 dark:text-gray-400 mt-1">${totals.unique_reporters || 0} reporters</div>
                     </div>
                 </div>
+                ${dmarcRecordCardHtml}
             `;
         }
 

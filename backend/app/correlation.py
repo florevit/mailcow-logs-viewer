@@ -61,10 +61,13 @@ def detect_direction(rspamd_log: Dict[str, Any]) -> str:
     Detect if email is inbound or outbound based on Rspamd log
     
     Note: Internal direction is determined later based on Postfix relay=dovecot
+    Local domains list includes primary + alias domains (from API alias-domain/all).
     
     Logic:
     1. Check for MAILCOW_AUTH symbol (definitive outbound indicator)
     2. Check user field (if authenticated = outbound, if unknown = inbound)
+    3. Fallback: if inbound by above but sender is local (incl. alias domain) and
+       any recipient is external → outbound
     
     Args:
         rspamd_log: Rspamd log entry dictionary
@@ -82,11 +85,22 @@ def detect_direction(rspamd_log: Dict[str, Any]) -> str:
     if user != 'unknown' and user:
         return 'outbound'
     
-    # If user is unknown, it's inbound (external sender)
-    if user == 'unknown':
-        return 'inbound'
+    # If user is unknown, default to inbound
+    direction = 'inbound' if user == 'unknown' else 'unknown'
     
-    return 'unknown'
+    # Fallback: sender from alias domain may not have MAILCOW_AUTH/user set
+    if direction == 'inbound':
+        sender = rspamd_log.get('sender_smtp')
+        recipients = rspamd_log.get('rcpt_smtp', [])
+        if isinstance(recipients, str):
+            recipients = [recipients] if recipients else []
+        sender_domain = extract_domain(sender) if sender else None
+        if sender_domain and is_local_domain(sender_domain) and recipients:
+            for r in recipients:
+                recv_domain = extract_domain(r) if r else None
+                if recv_domain and not is_local_domain(recv_domain):
+                    return 'outbound'
+    return direction
 
 
 def is_blacklisted(email: str) -> bool:

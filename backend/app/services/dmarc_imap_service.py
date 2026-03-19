@@ -41,17 +41,25 @@ class DMARCImapService:
     def connect(self) -> bool:
         """Connect to IMAP server"""
         try:
+            if not self.host or not self.port:
+                raise ValueError(f"IMAP server configuration incomplete: host={self.host}, port={self.port}")
+            
             if self.use_ssl:
                 self.connection = imaplib.IMAP4_SSL(self.host, self.port, timeout=30)
             else:
                 self.connection = imaplib.IMAP4(self.host, self.port, timeout=30)
             
             self.connection.login(self.user, self.password)
-            logger.info(f"Successfully connected to IMAP server {self.host}")
+            logger.info(f"Successfully connected to IMAP server {self.host}:{self.port}")
             return True
             
+        except ConnectionRefusedError as e:
+            error_msg = f"Cannot connect to IMAP server {self.host}:{self.port} - Connection refused. Please check if the server is running and accessible."
+            logger.error(error_msg)
+            raise ConnectionError(error_msg) from e
         except Exception as e:
-            logger.error(f"Failed to connect to IMAP server: {e}")
+            error_msg = f"Failed to connect to IMAP server {self.host}:{self.port}: {e}"
+            logger.error(error_msg)
             raise
     
     def disconnect(self):
@@ -697,7 +705,9 @@ class DMARCImapService:
             sync_record.error_message = str(e)
             db.commit()
             
-            raise
+            # Return error result instead of raising exception
+            # This allows the scheduler to handle it gracefully
+            return self._build_result(sync_record)
             
         finally:
             self.disconnect()

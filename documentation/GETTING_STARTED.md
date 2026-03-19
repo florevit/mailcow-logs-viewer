@@ -21,8 +21,9 @@ nano .env
 MAILCOW_URL=https://mail.example.com
 MAILCOW_API_KEY=your_api_key_here
 POSTGRES_PASSWORD=a7f3c8e2-4b1d-4f9a-8c3e-7d2f1a9b5e4c
-ADMIN_EMAIL=admin@yourdomain.com
 ```
+
+> **💡 Tip:** After starting the application, you can configure most other settings from the web UI (Settings tab). See [Settings UI Guide](Settings_UI.md) for details.
 
 **Start:**
 ```bash
@@ -33,51 +34,33 @@ docker compose up -d
 
 ---
 
-## Optional Features (all disabled by default)
+## Optional: Enable Settings UI
 
-Add to your `.env` file to enable:
+To manage most settings from the web interface instead of `.env`:
 
-**MaxMind GeoIP** (geographic location data):
 ```env
-MAXMIND_ACCOUNT_ID=your_id
-MAXMIND_LICENSE_KEY=your_key
+SETTINGS_EDIT_VIA_UI_ENABLED=true
 ```
 
-And add data volume in `docker-compose.yml`:
-```yaml
-services:
-  app:
-    volumes:
-      - ./data:/app/data
-```
+After restarting, go to the **Settings** tab in the web UI to configure:
+- Fetch intervals and retention
+- SMTP notifications
+- DMARC settings
+- Authentication
+- MaxMind GeoIP
+- And many more...
 
-**SMTP Notifications:**
-```env
-SMTP_ENABLED=true
-SMTP_HOST=smtp.yourdomain.com
-SMTP_PORT=587
-SMTP_USE_TLS=true
-SMTP_USER=user
-SMTP_PASSWORD=pass
-SMTP_FROM=noreply@yourdomain.com
-```
+See [Settings UI Guide](Settings_UI.md) for details.
 
-**DMARC IMAP Auto-Import:**
-```env
-DMARC_IMAP_ENABLED=true
-DMARC_IMAP_HOST=imap.yourdomain.com
-DMARC_IMAP_PORT=993
-DMARC_IMAP_USE_SSL=true
-DMARC_IMAP_USER=dmarc@yourdomain.com
-DMARC_IMAP_PASSWORD=your_password
-```
+---
 
-**Authentication:**
-```env
-AUTH_ENABLED=true
-AUTH_USERNAME=your_username
-AUTH_PASSWORD=your_secure_password
-```
+## Optional Features (via ENV or UI)
+
+All optional features can be configured either via `.env` file or through the web UI (when `SETTINGS_EDIT_VIA_UI_ENABLED=true`).
+
+**📖 Complete reference:** See [ENV Settings Documentation](ENV_Settings.md) for all available environment variables.
+
+
 
 ---
 
@@ -127,19 +110,23 @@ nano .env
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `MAILCOW_URL` | Your mailcow instance URL | `https://mail.example.com` |
+| `MAILCOW_URL` | Your mailcow instance URL (without trailing slash) | `https://mail.example.com` |
 | `MAILCOW_API_KEY` | Your mailcow API key | `abc123-def456...` |
 | `POSTGRES_PASSWORD` | Database password<br>⚠️ Avoid special chars (`@:/?#`) - breaks connection strings<br>💡 Use UUID: `uuidgen` or https://it-tools.tech/uuid-generator | `a7f3c8e2-4b1d-4f9a-8c3e-7d2f1a9b5e4c` |
-| `ADMIN_EMAIL` | Admin email for notifications | `admin@yourdomain.com` |
 
-**Review all other settings** and adjust as needed for your environment (timezone, fetch intervals, retention period, etc.)
+**Optional:** Enable Settings UI to manage other settings from the web interface:
+```env
+SETTINGS_EDIT_VIA_UI_ENABLED=true
+```
+
+> **💡 Tip:** After enabling Settings UI, you can configure most other settings (fetch intervals, retention, SMTP, DMARC, authentication, etc.) directly from the **Settings** tab in the web UI. See [Settings UI Guide](Settings_UI.md) and [Complete ENV Reference](ENV_Settings.md) for details.
 
 #### Optional: Enable Authentication
 
 For production deployments, enable HTTP Basic Authentication:
 
 ```env
-AUTH_ENABLED=true
+BASIC_AUTH_ENABLED=true
 AUTH_USERNAME=your_username
 AUTH_PASSWORD=your_secure_password
 ```
@@ -149,6 +136,8 @@ When enabled:
 - Users are redirected to a login page if not authenticated
 - Use strong passwords in production
 - **Important**: Use HTTPS/TLS when exposing over the internet
+
+> **💡 Tip:** Authentication can also be configured via the Settings UI when `SETTINGS_EDIT_VIA_UI_ENABLED=true`.
 
 ### Step 4: Get Your mailcow API Key
 
@@ -231,6 +220,8 @@ INFO - ✅ Imported 45 Rspamd logs
 ---
 
 # Optional Features Configuration
+
+> **💡 Tip:** Most settings can be configured via the web UI when `SETTINGS_EDIT_VIA_UI_ENABLED=true`. See [Settings UI Guide](Settings_UI.md) and [Complete ENV Reference](ENV_Settings.md) for all available options.
 
 ## MaxMind GeoIP Integration
 
@@ -339,7 +330,7 @@ Override the admin email specifically for DMARC processing errors:
 DMARC_ERROR_EMAIL=dmarc-alerts@yourdomain.com
 ```
 
-**If not configured:** Uses `ADMIN_EMAIL` by default.
+**If not configured:** Uses `ADMIN_EMAIL` if set (can be configured via Settings UI).
 
 
 ---
@@ -368,7 +359,7 @@ DMARC_ERROR_EMAIL=dmarc-alerts@yourdomain.com
 
 ### Container won't start?
 
-- Verify `ADMIN_EMAIL` is set
+- Verify required settings (`MAILCOW_URL`, `MAILCOW_API_KEY`, `POSTGRES_PASSWORD`) are set
 - Check Docker logs: `docker compose logs -f`
 
 ### Port 8080 already in use?
@@ -412,6 +403,8 @@ docker compose up -d
 ## Documentation
 
 - **[API Documentation](API.md)** - Full API reference
+- **[ENV Settings Reference](ENV_Settings.md)** - Complete environment variables guide
+- **[Settings UI Guide](Settings_UI.md)** - Configure settings from web interface
 - **[Changelog](../CHANGELOG.md)** - Version history
 
 ---

@@ -210,8 +210,8 @@
                 // Save credentials
                 saveAuthCredentials(username, password);
                 
-                // Test authentication
-                const response = await authenticatedFetch('/api/info');
+                // Test authentication (use /api/auth/verify so wrong credentials return 401)
+                const response = await authenticatedFetch('/api/auth/verify');
                 
                 if (response.ok) {
                     // Success - redirect to main app using replace to avoid loop
@@ -220,11 +220,11 @@
                     throw new Error('Authentication failed');
                 }
             } catch (error) {
-                // Show error
+                // Show error (always show user-friendly message for failed login)
                 if (errorDiv) {
                     errorDiv.classList.remove('hidden');
                     if (errorText) {
-                        errorText.textContent = error.message || 'Invalid username or password';
+                        errorText.textContent = 'Invalid username or password';
                     }
                 }
                 

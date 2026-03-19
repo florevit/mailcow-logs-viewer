@@ -12,15 +12,39 @@ from typing import Dict, Any, Optional
 
 from ..database import get_db
 from ..models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
-from ..config import settings
-from ..scheduler import last_fetch_run_time, get_job_status, update_job_status
+from ..config import settings, EDITABLE_SETTING_KEYS, reload_settings, Settings
+from ..config import _get_field_annotations
+from ..scheduler import last_fetch_run_time, get_job_status, update_job_status, reschedule_interval_jobs
+from ..services.settings_store import get_config_overrides_from_db, save_config_overrides_to_db, has_config_overrides_in_db
 from ..services.connection_test import test_smtp_connection, test_imap_connection
 from ..services.geoip_downloader import is_license_configured, get_geoip_status
 from .domains import get_cached_server_ip
+from ..mailcow_api import mailcow_api
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Keys whose values are masked in GET /api/settings (never returned in plain text)
+_SENSITIVE_SETTING_KEYS = frozenset({
+    "mailcow_api_key", "auth_password", "oauth2_client_secret", "smtp_password",
+    "dmarc_imap_password", "session_secret_key", "maxmind_license_key"
+})
+MASK_PLACEHOLDER = "********"
+
+
+def _effective_config_for_editable(settings_obj: Settings) -> Dict[str, Any]:
+    """Build dict of editable keys -> value (secrets masked) for API response."""
+    out = {}
+    for key in EDITABLE_SETTING_KEYS:
+        if not hasattr(settings_obj, key):
+            continue
+        val = getattr(settings_obj, key)
+        if key in _SENSITIVE_SETTING_KEYS:
+            out[key] = MASK_PLACEHOLDER if (val is not None and str(val).strip() != "") else ""
+        else:
+            out[key] = val
+    return out
 
 
 def format_datetime_utc(dt: Optional[datetime]) -> Optional[str]:
@@ -95,7 +119,8 @@ async def get_settings_info(db: Session = Depends(get_db)):
         
         jobs_status = get_job_status()
 
-        return {
+        result = {
+            "settings_edit_via_ui_enabled": settings.edit_settings_via_ui_enabled,
             "configuration": {
                 "mailcow_url": settings.mailcow_url,
                 "server_ip": get_cached_server_ip(),
@@ -190,6 +215,14 @@ async def get_settings_info(db: Session = Depends(get_db)):
                     "status": jobs_status.get('cleanup_logs', {}).get('status', 'unknown'),
                     "last_run": format_datetime_utc(jobs_status.get('cleanup_logs', {}).get('last_run')),
                     "error": jobs_status.get('cleanup_logs', {}).get('error')
+                },
+                "cleanup_dmarc_reports": {
+                    "schedule": "Daily at 2:15 AM",
+                    "description": "Removes old DMARC and TLS reports based on DMARC retention period",
+                    "retention": f"{settings.dmarc_retention_days} days",
+                    "status": jobs_status.get('cleanup_dmarc_reports', {}).get('status', 'unknown'),
+                    "last_run": format_datetime_utc(jobs_status.get('cleanup_dmarc_reports', {}).get('last_run')),
+                    "error": jobs_status.get('cleanup_dmarc_reports', {}).get('error')
                 },
                 "check_app_version": {
                     "interval": "6 hours",
@@ -304,16 +337,148 @@ async def get_settings_info(db: Session = Depends(get_db)):
                 for corr in recent_incomplete
             ]
         }
+        # When UI editing is enabled, include full editable config and migration status
+        if settings.edit_settings_via_ui_enabled:
+            result["editable_config"] = _effective_config_for_editable(settings)
+            result["settings_migrated"] = has_config_overrides_in_db(db)
+        return result
         
     except Exception as e:
         logger.error(f"Error fetching settings info: {e}")
         return {
             "error": str(e),
+            "settings_edit_via_ui_enabled": getattr(settings, "edit_settings_via_ui_enabled", False),
             "configuration": {},
             "import_status": {},
             "correlation_status": {},
             "background_jobs": {}
         }
+
+
+@router.get("/settings")
+async def get_editable_settings(db: Session = Depends(get_db)):
+    """
+    Get effective configuration for editing (editable keys only; secrets masked).
+    Includes settings_edit_via_ui_enabled so frontend can show/hide edit form.
+    When UI editing is enabled, reloads settings from DB so response is up to date.
+    Returns env_differs: keys where ENV differs from DB (to show warnings).
+    """
+    if settings.edit_settings_via_ui_enabled:
+        reload_settings(db)
+    env_differs = {}
+    if settings.edit_settings_via_ui_enabled and has_config_overrides_in_db(db):
+        # Compare ENV-only values with DB values
+        env_only = Settings()  # Loads from ENV/defaults only
+        for key in EDITABLE_SETTING_KEYS:
+            if hasattr(env_only, key) and hasattr(settings, key):
+                env_val = getattr(env_only, key)
+                db_val = getattr(settings, key)
+                # Only show warning if values differ AND at least one is not empty/None
+                # If both are empty/None, no warning needed
+                if env_val != db_val:
+                    # Normalize empty values for comparison
+                    env_empty = env_val is None or env_val == "" or env_val == 0 or env_val is False
+                    db_empty = db_val is None or db_val == "" or db_val == 0 or db_val is False
+                    # Only add to differs if not both empty
+                    if not (env_empty and db_empty):
+                        env_differs[key] = {"env": env_val, "db": db_val}
+    return {
+        "settings_edit_via_ui_enabled": settings.edit_settings_via_ui_enabled,
+        "settings_migrated": has_config_overrides_in_db(db),
+        "configuration": _effective_config_for_editable(settings),
+        "env_differs": env_differs,
+    }
+
+
+@router.put("/settings")
+async def update_settings(body: Dict[str, Any], db: Session = Depends(get_db)):
+    """
+    Update app settings from UI. Only allowed when SETTINGS_EDIT_VIA_UI_ENABLED is true.
+    Accepts only keys in EDITABLE_SETTING_KEYS. Secrets: send empty string to leave unchanged.
+    """
+    if not settings.edit_settings_via_ui_enabled:
+        raise HTTPException(status_code=403, detail="Editing settings from UI is disabled. Set SETTINGS_EDIT_VIA_UI_ENABLED=true to enable.")
+    allowed = {k: v for k, v in body.items() if k in EDITABLE_SETTING_KEYS}
+    # For sensitive keys, empty string means "do not change" - omit from payload
+    for sk in _SENSITIVE_SETTING_KEYS:
+        if sk in allowed and (allowed[sk] is None or (isinstance(allowed[sk], str) and allowed[sk].strip() == "")):
+            del allowed[sk]
+    if not allowed:
+        reload_settings(db)
+        return {"settings_edit_via_ui_enabled": True, "settings_migrated": True, "configuration": _effective_config_for_editable(settings)}
+    try:
+        # Validate by building a Settings copy with current + updates
+        current = settings.model_dump()
+        for k, v in allowed.items():
+            current[k] = v
+        # Coerce None to valid types (UI sends null for empty; Settings expects str/int/bool)
+        annotations = _get_field_annotations()
+        for k, v in list(current.items()):
+            if v is not None or k not in annotations:
+                continue
+            ann = annotations[k]
+            if getattr(ann, "__args__", None) and type(None) in getattr(ann, "__args__", ()):
+                continue  # Optional: None is valid
+            effective = getattr(ann, "__args__", None)
+            if effective:
+                effective = [a for a in ann.__args__ if a is not type(None)]
+                effective = effective[0] if effective else ann
+            else:
+                effective = ann
+            if effective == str or effective is str:
+                current[k] = ""
+            elif effective == int or effective is int:
+                current[k] = 0
+            elif effective == bool or effective is bool:
+                current[k] = False
+        Settings.model_validate(current)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Validation error: {e}")
+    save_config_overrides_to_db(db, allowed)
+    reload_settings(db)
+    mailcow_api.reload_config()
+    reschedule_interval_jobs()
+    return {"settings_edit_via_ui_enabled": True, "settings_migrated": True, "configuration": _effective_config_for_editable(settings)}
+
+
+@router.post("/settings/import-from-env")
+async def import_settings_from_env(db: Session = Depends(get_db)):
+    """
+    Import current effective configuration (defaults + ENV + existing DB) into DB.
+    Only allowed when SETTINGS_EDIT_VIA_UI_ENABLED is true.
+    Use this to migrate from ENV to DB so you can later remove ENV vars.
+    Returns differences between ENV and DB after import (to show warnings).
+    """
+    if not settings.edit_settings_via_ui_enabled:
+        raise HTTPException(status_code=403, detail="Editing settings from UI is disabled. Set SETTINGS_EDIT_VIA_UI_ENABLED=true to enable.")
+    # Get ENV-only values (before DB overrides) for comparison
+    env_only = Settings()  # Loads from ENV/defaults only
+    # Current effective config is in `settings` (includes DB overrides if any); export only editable keys
+    overrides = {}
+    for key in EDITABLE_SETTING_KEYS:
+        if hasattr(settings, key):
+            val = getattr(settings, key)
+            overrides[key] = val
+    save_config_overrides_to_db(db, overrides)
+    reload_settings(db)
+    mailcow_api.reload_config()
+    reschedule_interval_jobs()
+    # After reload, settings now has DB values; compare with ENV to find differences
+    env_differs = {}
+    for key in EDITABLE_SETTING_KEYS:
+        if hasattr(env_only, key) and hasattr(settings, key):
+            env_val = getattr(env_only, key)
+            db_val = getattr(settings, key)
+            if env_val != db_val:
+                env_differs[key] = {"env": env_val, "db": db_val}
+    return {
+        "message": "Configuration imported from current environment into DB.",
+        "settings_edit_via_ui_enabled": True,
+        "settings_migrated": True,
+        "configuration": _effective_config_for_editable(settings),
+        "env_differs": env_differs,  # Keys where ENV differs from DB (user should remove ENV vars)
+    }
+
 
 @router.post("/settings/test/smtp")
 async def test_smtp():
@@ -380,9 +545,7 @@ async def get_health_detailed(db: Session = Depends(get_db)):
 
 async def validate_maxmind_license() -> Dict[str, Any]:
     """Validate MaxMind license key"""
-    import os
-    
-    license_key = os.getenv('MAXMIND_LICENSE_KEY')
+    license_key = settings.maxmind_license_key
     
     if not license_key:
         return {"configured": False, "valid": False, "error": None}
@@ -420,6 +583,7 @@ async def trigger_job(job_name: str, background_tasks: BackgroundTasks):
     - update_final_status: Update final status for correlations
     - expire_correlations: Mark old incomplete correlations as expired
     - cleanup_logs: Remove old logs
+    - cleanup_dmarc_reports: Remove old DMARC/TLS reports
     - check_app_version: Check for app updates
     - dns_check: Validate DNS records for all domains
     - sync_local_domains: Sync domains from mailcow API
@@ -435,6 +599,7 @@ async def trigger_job(job_name: str, background_tasks: BackgroundTasks):
         update_final_status_for_correlations,
         expire_old_correlations,
         cleanup_old_logs,
+        cleanup_old_dmarc_reports,
         check_app_version_update,
         check_all_domains_dns_background,
         sync_local_domains,
@@ -453,6 +618,7 @@ async def trigger_job(job_name: str, background_tasks: BackgroundTasks):
         'update_final_status': ('update_final_status', update_final_status_for_correlations),
         'expire_correlations': ('expire_correlations', expire_old_correlations),
         'cleanup_logs': ('cleanup_logs', cleanup_old_logs),
+        'cleanup_dmarc_reports': ('cleanup_dmarc_reports', cleanup_old_dmarc_reports),
         'check_app_version': ('check_app_version', check_app_version_update),
         'dns_check': ('dns_check', check_all_domains_dns_background),
         'sync_local_domains': ('sync_local_domains', sync_local_domains),

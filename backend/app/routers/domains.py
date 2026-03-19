@@ -2,9 +2,9 @@
 API endpoints for domains management with DNS validation
 """
 import logging
+import re
 import asyncio
 import ipaddress
-import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any, List
 import dns.resolver
@@ -36,42 +36,13 @@ async def init_server_ip():
         return _server_ip_cache
     
     try:
-        import httpx
-        from app.config import settings
+        _server_ip_cache = await mailcow_api.get_status_host_ip()
+        if _server_ip_cache:
+            logger.info(f"Server IP cached successfully: {_server_ip_cache}")
+        else:
+            logger.warning("Could not fetch server IP from mailcow - no valid IP in response")
+        return _server_ip_cache
         
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"{settings.mailcow_url}/api/v1/get/status/host/ip",
-                headers={"X-API-Key": settings.mailcow_api_key}
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            logger.debug(f"mailcow IP API response: {data}")
-            
-            if isinstance(data, list) and len(data) > 0:
-                _server_ip_cache = data[0].get('ipv4')
-                if _server_ip_cache:
-                    logger.info(f"Server IP cached successfully: {_server_ip_cache}")
-                    return _server_ip_cache
-                else:
-                    logger.warning(f"API response missing 'ipv4' field. Response: {data[0]}")
-            elif isinstance(data, dict):
-                _server_ip_cache = data.get('ipv4')
-                if _server_ip_cache:
-                    logger.info(f"Server IP cached successfully: {_server_ip_cache}")
-                    return _server_ip_cache
-                else:
-                    logger.warning(f"API response missing 'ipv4' field. Response: {data}")
-            else:
-                logger.warning(f"Unexpected API response format. Type: {type(data)}, Data: {data}")
-        
-        logger.warning("Could not fetch server IP from mailcow - no valid IP in response")
-        return None
-        
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error fetching server IP: {e.response.status_code} - {e.response.text}")
-        return None
     except Exception as e:
         logger.error(f"Failed to fetch server IP: {type(e).__name__} - {str(e)}")
         return None
@@ -583,76 +554,18 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
         Dictionary with DKIM check results
     """
     try:
-        # Get DKIM configuration from mailcow using httpx directly
-        import httpx
-        from app.config import settings
+        # Get DKIM configuration from mailcow using mailcow_api
+        dkim_config = await mailcow_api.get_dkim(domain)
         
-        async with httpx.AsyncClient(timeout=10) as client:
-            try:
-                response = await client.get(
-                    f"{settings.mailcow_url}/api/v1/get/dkim/{domain}",
-                    headers={"X-API-Key": settings.mailcow_api_key}
-                )
-                response.raise_for_status()
-                dkim_data = response.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error fetching DKIM from mailcow for {domain}: {e.response.status_code}")
-                return {
-                    'status': 'error',
-                    'message': f'mailcow API error: HTTP {e.response.status_code}',
-                    'selector': None,
-                    'expected_record': None,
-                    'actual_record': None,
-                    'match': False,
-                    'warnings': [],
-                    'info': [],
-                    'parameters': {}
-                }
-            except httpx.RequestError as e:
-                logger.error(f"Request error fetching DKIM from mailcow for {domain}: {e}")
-                return {
-                    'status': 'error',
-                    'message': 'Failed to connect to mailcow API',
-                    'selector': None,
-                    'expected_record': None,
-                    'actual_record': None,
-                    'match': False,
-                    'warnings': [],
-                    'info': [],
-                    'parameters': {}
-                }
-        
-        # Validate response structure - API can return either dict or list
-        if isinstance(dkim_data, dict):
-            # API returned dict directly
-            dkim_config = dkim_data
-        elif isinstance(dkim_data, list):
-            # API returned list
-            if len(dkim_data) == 0:
-                logger.warning(f"DKIM not configured in mailcow for {domain}")
-                return {
-                    'status': 'error',
-                    'message': 'DKIM not configured in mailcow',
-                    'selector': None,
-                    'expected_record': None,
-                    'actual_record': None,
-                    'match': False,
-                'warnings': [],
-                'info': [],
-                'parameters': {}
-                }
-            # Get first element from list
-            dkim_config = dkim_data[0]
-        else:
-            logger.error(f"DKIM API returned unexpected format for {domain}: {type(dkim_data)}")
+        if dkim_config is None:
+            logger.warning(f"DKIM not configured in mailcow for {domain}")
             return {
                 'status': 'error',
-                'message': f'Invalid API response format: {type(dkim_data).__name__}',
+                'message': 'DKIM not configured in mailcow',
                 'selector': None,
                 'expected_record': None,
                 'actual_record': None,
-                'match': False
-            ,
+                'match': False,
                 'warnings': [],
                 'info': [],
                 'parameters': {}
@@ -824,6 +737,47 @@ async def check_dkim_record(domain: str) -> Dict[str, Any]:
         }
 
 
+def parse_dmarc_record_tags(record_str: str) -> Dict[str, Any]:
+    """
+    Parse DMARC TXT record string into structured settings (RFC 7489 tags).
+    Returns a dict with human-readable keys; only includes tags that are present.
+    """
+    if not record_str or not record_str.strip().startswith('v=DMARC1'):
+        return {}
+    settings = {}
+    # Split by semicolon; each part is tag=value (value may contain commas for rua/ruf)
+    for part in record_str.split(';'):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        tag, _, value = part.partition('=')
+        tag = tag.strip().lower()
+        value = value.strip()
+        if not value:
+            continue
+        if tag == 'p':
+            settings['policy'] = value.lower()
+        elif tag == 'sp':
+            settings['subdomain_policy'] = value.lower()
+        elif tag == 'rua':
+            # Comma-separated list of URIs (e.g. mailto:dmarc@example.com)
+            settings['aggregate_report_uris'] = [u.strip() for u in value.split(',') if u.strip()]
+        elif tag == 'ruf':
+            settings['forensic_report_uris'] = [u.strip() for u in value.split(',') if u.strip()]
+        elif tag == 'adkim':
+            settings['dkim_alignment'] = value.lower()
+        elif tag == 'aspf':
+            settings['spf_alignment'] = value.lower()
+        elif tag == 'pct':
+            try:
+                settings['percentage'] = int(value)
+            except ValueError:
+                settings['percentage'] = value
+        elif tag == 'fo':
+            settings['failure_reporting_options'] = value.lower()
+    return settings
+
+
 async def check_dmarc_record(domain: str) -> Dict[str, Any]:
     """
     Check DMARC record for a domain
@@ -832,7 +786,7 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
         domain: Domain name to check
         
     Returns:
-        Dictionary with DMARC check results
+        Dictionary with DMARC check results (status, message, record, policy, is_strong, warnings, settings)
     """
     try:
         dmarc_domain = f"_dmarc.{domain}"
@@ -855,13 +809,16 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
                 'record': None,
                 'policy': None,
                 'is_strong': False,
-                'warnings': ['Add a DMARC record with at least "quarantine" policy']
+                'warnings': ['Add a DMARC record with at least "quarantine" policy'],
+                'settings': {}
             }
         
         # Extract policy
-        import re
         policy_match = re.search(r'p=(none|quarantine|reject)', dmarc_record)
         policy = policy_match.group(1) if policy_match else 'unknown'
+        
+        # Parse all tags into settings
+        settings = parse_dmarc_record_tags(dmarc_record)
         
         # Check if policy is strong enough
         is_strong = policy in ['quarantine', 'reject']
@@ -882,7 +839,8 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
             'record': dmarc_record,
             'policy': policy,
             'is_strong': is_strong,
-            'warnings': warnings
+            'warnings': warnings,
+            'settings': settings
         }
         
     except dns.resolver.NXDOMAIN:
@@ -892,7 +850,8 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
             'record': None,
             'policy': None,
             'is_strong': False,
-            'warnings': ['Add a DMARC record with at least "quarantine" policy']
+            'warnings': ['Add a DMARC record with at least "quarantine" policy'],
+            'settings': {}
         }
     except dns.resolver.NoAnswer:
         return {
@@ -901,7 +860,8 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
             'record': None,
             'policy': None,
             'is_strong': False,
-            'warnings': ['Add a DMARC record with at least "quarantine" policy']
+            'warnings': ['Add a DMARC record with at least "quarantine" policy'],
+            'settings': {}
         }
     except Exception as e:
         logger.error(f"Error checking DMARC for {domain}: {e}")
@@ -911,7 +871,8 @@ async def check_dmarc_record(domain: str) -> Dict[str, Any]:
             'record': None,
             'policy': None,
             'is_strong': False,
-            'warnings': []
+            'warnings': [],
+            'settings': {}
         }
 
 

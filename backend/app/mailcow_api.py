@@ -22,17 +22,28 @@ class MailcowAPI:
     """Client for interacting with mailcow API"""
     
     def __init__(self):
+        self._update_config()
+        logger.info(f"mailcow API client initialized for {self.base_url} (SSL verification: {self.verify_ssl})")
+    
+    def _update_config(self):
+        """Update configuration from settings (supports dynamic reload)"""
         self.base_url = settings.mailcow_url
         self.api_key = settings.mailcow_api_key
         self.timeout = settings.mailcow_api_timeout
+        self.verify_ssl = settings.mailcow_api_verify_ssl
         
         # Setup headers
         self.headers = {
             "X-API-Key": self.api_key,
             "Content-Type": "application/json"
         }
-        
-        logger.info(f"mailcow API client initialized for {self.base_url}")
+    
+    def reload_config(self):
+        """Reload configuration from settings (call after settings are updated)"""
+        old_url = self.base_url
+        self._update_config()
+        if old_url != self.base_url:
+            logger.info(f"mailcow API client configuration reloaded: {old_url} -> {self.base_url}")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -55,7 +66,7 @@ class MailcowAPI:
         """
         url = f"{self.base_url}{endpoint}"
         
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl) as client:
             try:
                 response = await client.request(
                     method=method,
@@ -332,6 +343,37 @@ class MailcowAPI:
             logger.error(f"Failed to fetch active domains: {e}")
             return []
     
+    async def get_alias_domains(self) -> List[str]:
+        """
+        Fetch active alias domains from mailcow (alias_domain -> target_domain).
+        Returns list of alias domain names that are
+        configured as alias of a primary domain. Used so mail from these is
+        treated as outbound/local.
+        
+        Returns:
+            List of active alias domain names
+        """
+        logger.info("Fetching alias domains")
+        try:
+            data = await self._make_request("/api/v1/get/alias-domain/all")
+            if not isinstance(data, list):
+                logger.warning(f"Unexpected alias-domain response format: {type(data)}")
+                return []
+            active = [
+                item.get('alias_domain', '')
+                for item in data
+                if item.get('active', 0) == 1 and item.get('alias_domain')
+            ]
+            if active:
+                logger.info(f"Found {len(active)} active alias domains: {', '.join(active)}")
+            return active
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch alias domains: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to fetch alias domains: {e}")
+            return []
+    
     async def get_mailboxes(self) -> List[Dict[str, Any]]:
         """
         Fetch all mailboxes from mailcow
@@ -392,6 +434,143 @@ class MailcowAPI:
         except MailcowAPIError as e:
             logger.error(f"mailcow API connection test: FAILED - {e}")
             return False
+    
+    async def get_status_host_ip(self) -> Optional[str]:
+        """
+        Fetch server IP address from mailcow
+        
+        Returns:
+            IPv4 address string or None if not found
+        """
+        logger.info("Fetching server IP address")
+        try:
+            data = await self._make_request("/api/v1/get/status/host/ip")
+            
+            # Handle different response formats
+            if isinstance(data, list) and len(data) > 0:
+                ip = data[0].get('ipv4')
+                if ip:
+                    logger.info(f"Retrieved server IP: {ip}")
+                    return ip
+            elif isinstance(data, dict):
+                ip = data.get('ipv4')
+                if ip:
+                    logger.info(f"Retrieved server IP: {ip}")
+                    return ip
+            
+            logger.warning("API response missing 'ipv4' field")
+            return None
+            
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch server IP: {e}")
+            return None
+    
+    async def get_dkim(self, domain: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch DKIM configuration for a domain
+        
+        Args:
+            domain: Domain name
+            
+        Returns:
+            DKIM configuration dictionary or None if not found
+        """
+        logger.info(f"Fetching DKIM configuration for {domain}")
+        try:
+            data = await self._make_request(f"/api/v1/get/dkim/{domain}")
+            
+            # Handle different response formats
+            if isinstance(data, dict):
+                logger.info(f"Retrieved DKIM configuration for {domain}")
+                return data
+            elif isinstance(data, list):
+                if len(data) > 0:
+                    logger.info(f"Retrieved DKIM configuration for {domain}")
+                    return data[0]
+                else:
+                    logger.warning(f"DKIM not configured in mailcow for {domain}")
+                    return None
+            else:
+                logger.warning(f"Unexpected DKIM response format: {type(data)}")
+                return None
+                
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch DKIM configuration for {domain}: {e}")
+            return None
+    
+    async def get_transports(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all transports from mailcow
+        
+        Returns:
+            List of transports
+        """
+        logger.info("Fetching transports")
+        try:
+            data = await self._make_request("/api/v1/get/transport/all")
+            
+            # Handle different response formats
+            if isinstance(data, list):
+                logger.info(f"Retrieved {len(data)} transports")
+                return data
+            elif isinstance(data, dict):
+                # API may return empty dict {} when no transports exist
+                if not data:
+                    logger.info("No transports found (empty dict)")
+                    return []
+                # If dict has a key containing list, extract it
+                # Check common patterns
+                for key in ['transports', 'data', 'items']:
+                    if key in data and isinstance(data[key], list):
+                        logger.info(f"Retrieved {len(data[key])} transports from dict")
+                        return data[key]
+                # If dict is not empty but doesn't contain expected list, log warning
+                logger.warning(f"Transports API returned dict but no list found: {data}")
+                return []
+            else:
+                logger.warning(f"Unexpected transports response format: {type(data)}")
+                return []
+            
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch transports: {e}")
+            return []
+    
+    async def get_relayhosts(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all relayhosts from mailcow
+        
+        Returns:
+            List of relayhosts
+        """
+        logger.info("Fetching relayhosts")
+        try:
+            data = await self._make_request("/api/v1/get/relayhost/all")
+            
+            # Handle different response formats
+            if isinstance(data, list):
+                logger.info(f"Retrieved {len(data)} relayhosts")
+                return data
+            elif isinstance(data, dict):
+                # API may return empty dict {} when no relayhosts exist
+                if not data:
+                    logger.info("No relayhosts found (empty dict)")
+                    return []
+                # If dict has a key containing list, extract it
+                # Check common patterns
+                for key in ['relayhosts', 'data', 'items']:
+                    if key in data and isinstance(data[key], list):
+                        logger.info(f"Retrieved {len(data[key])} relayhosts from dict")
+                        return data[key]
+                # If dict is not empty but doesn't contain expected list, log warning
+                logger.warning(f"Relayhosts API returned dict but no list found: {data}")
+                return []
+            else:
+                logger.warning(f"Unexpected relayhosts response format: {type(data)}")
+                return []
+            
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch relayhosts: {e}")
+            return []
 
 
 mailcow_api = MailcowAPI()

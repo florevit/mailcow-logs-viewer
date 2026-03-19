@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-03-19
+
+### Added
+
+#### Settings Management via Web UI
+- Added settings editor accessible from Settings page (controlled by `SETTINGS_EDIT_VIA_UI_ENABLED=true`)
+- Settings organized into tabs: Mailcow, Fetch, Correlation, Application, Blacklist, Authentication, OAuth2, SMTP, Alerts, DMARC, DMARC IMAP, MaxMind
+- Settings stored in database override ENV variables
+- Migration tool to import current ENV configuration to database
+- Visual warnings for settings where ENV differs from DB
+
+#### SSL Verification Toggle for mailcow API
+- **Development Environment Support**: Added `MAILCOW_API_VERIFY_SSL` configuration option to allow connections to mailcow API with self-signed SSL certificates
+  - Default: `true` (SSL verification enabled for security)
+  - Set to `false` for development environments with self-signed certificates
+  - All API calls to mailcow now use consistent SSL verification settings
+  - Centralized API client ensures all requests use the same configuration
+
+#### DMARC Record Status and Settings on DMARC Domain Page
+- **Domain overview**: On the DMARC tab, when viewing a domain (e.g. after clicking a domain), a **DMARC Record** card now shows the current DNS record status and settings
+  - **Parsed settings**: Policy, Subdomain policy, Aggregate report URIs (rua), Forensic report URIs (ruf), DKIM/SPF alignment, Percentage, Failure reporting options (only present tags shown)
+
+#### DMARC Reports Automatic Cleanup
+- **Scheduled retention cleanup**: Old DMARC and TLS reports are now automatically deleted based on `DMARC_RETENTION_DAYS` (default: 60 days)
+
+#### Blacklist Notifications – Cleared and Improved
+- **Cleared notification**: Email alert when all monitored hosts are no longer on any (actionable) blacklists (previously at least one was listed)
+- **Improved notification**: Email alert when the number of listed hosts decreases (e.g. from 3 to 2), with subject "Blacklist Improved – X → Y Host(s) Listed" and list of hosts still listed
+
+#### Alias Domains Support for Mail Direction
+- **mailcow alias-domain API**: Sync of alias domains from `/api/v1/get/alias-domain/all` so that emails sent from alias domains are classified correctly
+- **Direction fallback**: When Rspamd reports inbound (e.g. user unknown), direction is reclassified to outbound if the sender domain is local (including alias) and at least one recipient is external
+
+### Fixed
+
+#### Alias Domain Mail Shown as Inbound
+- **Direction classification**: Emails sent from an alias domain (subdomain configured as alias of the main domain) toward the Internet were incorrectly shown as "inbound" in logs. They are now correctly shown as "outbound" by including alias domains in the local domains cache and applying a sender/recipient fallback when Rspamd does not set MAILCOW_AUTH or user for alias-domain sends.
+
+#### DMARC IMAP Sync Application Freezing
+- **Connection Timeout and Thread Pool**: Fixed issue where the application would freeze during IMAP connection attempts
+  - IMAP sync operations now run in a thread pool executor to prevent blocking the event loop
+  - Improved error messages with detailed host and port information for easier troubleshooting
+  - Connection errors are now handled gracefully without crashing the application
+
+#### Basic Auth Login with Wrong Credentials
+- **Login validation**: Fixed issue where entering incorrect username or password did not show an error and gave the illusion of successful login
+  - Login form now calls `GET /api/auth/verify` (protected endpoint) instead of `/api/info` (public) to validate credentials
+  - Invalid credentials now return 401 and display "Invalid username or password" on the login page
+  - Credentials and password field are cleared on failure
+
+### Technical
+
+#### New Environment Variables
+- `MAILCOW_API_VERIFY_SSL` - Control SSL certificate verification for mailcow API connections (default: `true`)
+  - Set to `false` for development environments with self-signed certificates
+  - All mailcow API requests respect this setting
+- `SETTINGS_EDIT_VIA_UI_ENABLED` - Enable settings editor in UI (default: `false`)
+  - Set to `true` to enable settings editor in UI
+  - Set to `false` to disable settings editor in UI
+
+---
+
 ## [2.2.5] - 2026-02-15
 
 ### Added

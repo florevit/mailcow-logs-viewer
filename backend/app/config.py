@@ -1,14 +1,22 @@
 """
 Configuration management using Pydantic Settings
 """
+import os
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator, field_validator
-from typing import List, Optional
+from pydantic import Field, validator, field_validator, model_validator
+from typing import List, Optional, Any, Dict
 import logging
 
 logger = logging.getLogger(__name__)
 
 _cached_active_domains: Optional[List[str]] = None
+
+# Database-only keys: not editable from UI (must stay in ENV).
+_DB_ONLY_KEYS = frozenset({"postgres_host", "postgres_port", "postgres_user", "postgres_password", "postgres_db"})
+# Flag that controls UI editing; only read from ENV, not stored in DB.
+# Name avoids "settings_" prefix to prevent Pydantic protected namespace warning.
+_EDIT_VIA_UI_FLAG_KEY = "edit_settings_via_ui_enabled"
+
 
 class Settings(BaseSettings):
     """Application settings"""
@@ -16,6 +24,10 @@ class Settings(BaseSettings):
     mailcow_url: str = Field(..., description="mailcow instance URL")
     mailcow_api_key: str = Field(..., description="mailcow API key")
     mailcow_api_timeout: int = Field(default=30, description="API request timeout in seconds")
+    mailcow_api_verify_ssl: bool = Field(
+        default=True,
+        description="Verify SSL certificates when connecting to mailcow API (set to false for development with self-signed certificates)"
+    )
     
     # Blacklist Configuration
     blacklist_emails: str = Field(
@@ -69,11 +81,37 @@ class Settings(BaseSettings):
     app_title: str = Field(default="mailcow Logs Viewer", description="Application title")
     app_logo_url: str = Field(default="", description="Application logo URL (optional)")
     
+    # Settings UI: allow editing config from web UI (overrides stored in DB). ENV only; default False.
+    # Field name avoids "settings_" prefix (Pydantic protected namespace).
+    edit_settings_via_ui_enabled: bool = Field(
+        default=False,
+        env="SETTINGS_EDIT_VIA_UI_ENABLED",
+        description="Allow editing app settings from the web UI; overrides stored in DB"
+    )
+
+    @model_validator(mode="after")
+    def _apply_edit_via_ui_from_env(self) -> "Settings":
+        """Force-read SETTINGS_EDIT_VIA_UI_ENABLED from os.environ (Docker/env_file sometimes not picked by Pydantic)."""
+        v = os.environ.get("SETTINGS_EDIT_VIA_UI_ENABLED", "").strip().lower()
+        if v in ("true", "1", "yes"):
+            object.__setattr__(self, "edit_settings_via_ui_enabled", True)
+        return self
+    
     # Advanced Configuration
     debug: bool = Field(default=False, description="Debug mode")
     max_search_results: int = Field(default=1000, description="Max search results")
     csv_export_limit: int = Field(default=10000, description="CSV export row limit")
     scheduler_workers: int = Field(default=4, description="Background job workers")
+    
+    @field_validator('scheduler_workers', mode='after')
+    @classmethod
+    def clamp_scheduler_workers(cls, v: int) -> int:
+        """Clamp scheduler_workers to 1-64 for thread pool size."""
+        if v < 1:
+            return 1
+        if v > 64:
+            return 64
+        return v
     
     # Authentication Configuration
     auth_enabled: bool = Field(
@@ -236,6 +274,19 @@ class Settings(BaseSettings):
         default=None,
         env='DMARC_ERROR_EMAIL',
         description='Email address for DMARC error notifications (defaults to ADMIN_EMAIL if not set)'
+    )
+
+    # MaxMind Configuration
+    maxmind_account_id: Optional[str] = Field(
+        default=None,
+        env='MAXMIND_ACCOUNT_ID',
+        description='MaxMind Account ID for GeoIP database downloads'
+    )
+
+    maxmind_license_key: Optional[str] = Field(
+        default=None,
+        env='MAXMIND_LICENSE_KEY',
+        description='MaxMind License Key for GeoIP database downloads'
     )
 
     # SMTP Configuration
@@ -411,7 +462,60 @@ class Settings(BaseSettings):
         case_sensitive = False
 
 
-settings = Settings()
+def _get_editable_setting_keys() -> frozenset:
+    """All Settings field names that are editable from UI (excludes DB keys, UI-edit flag, and deprecated/legacy fields)."""
+    excluded = _DB_ONLY_KEYS | {_EDIT_VIA_UI_FLAG_KEY, "auth_enabled", "tz"}  # auth_enabled deprecated, tz legacy
+    keys = set(Settings.model_fields.keys()) - excluded
+    return frozenset(keys)
+
+
+def _get_field_annotations() -> Dict[str, Any]:
+    """Field name -> annotation for type coercion when loading from DB."""
+    return {k: v.annotation for k, v in Settings.model_fields.items()}
+
+
+EDITABLE_SETTING_KEYS = _get_editable_setting_keys()
+
+
+def build_settings(db: Optional[Any] = None) -> Settings:
+    """
+    Build effective Settings: defaults -> ENV -> DB overrides (when settings_edit_via_ui_enabled and db given).
+    """
+    base = Settings()
+    if not base.edit_settings_via_ui_enabled or db is None:
+        return base
+    try:
+        from .services.settings_store import get_config_overrides_from_db
+        overrides = get_config_overrides_from_db(db, _get_field_annotations())
+        if not overrides:
+            return base
+        # Only apply overrides for keys that are in EDITABLE_SETTING_KEYS
+        allowed = {k: v for k, v in overrides.items() if k in EDITABLE_SETTING_KEYS}
+        if not allowed:
+            return base
+        return base.model_copy(update=allowed)
+    except Exception as e:
+        logger.warning("Could not load config overrides from DB: %s", e)
+        return base
+
+
+class SettingsWrapper:
+    """Wrapper so that settings can be reloaded (e.g. after PUT) without changing import references."""
+    _inner: Settings
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+_settings_wrapper = SettingsWrapper()
+_settings_wrapper._inner = Settings()
+settings = _settings_wrapper
+
+
+def reload_settings(db: Optional[Any] = None) -> None:
+    """Reload effective settings (e.g. after saving from UI). Updates the global settings wrapper."""
+    global _settings_wrapper
+    _settings_wrapper._inner = build_settings(db)
 
 
 def setup_logging():

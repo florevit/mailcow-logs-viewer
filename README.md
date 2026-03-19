@@ -191,6 +191,8 @@ RESTful API for all functionality:
 | [API Documentation](documentation/API.md) | API reference |
 | [Changelog](CHANGELOG.md) | Version history |
 | [env.example](env.example) | Configuration options |
+| [ENV Settings](documentation/ENV_SETTINGS.md) | Configuration options |
+| [Settings Editor](documentation/SETTINGS_EDITOR.md) | Settings editor |
 
 ---
 

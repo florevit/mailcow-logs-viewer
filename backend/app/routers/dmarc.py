@@ -23,6 +23,7 @@ from ..services.dmarc_cache import (
 )
 from ..config import settings
 from ..scheduler import update_job_status
+from .domains import get_cached_dns_check, check_dmarc_record, parse_dmarc_record_tags
 
 logger = logging.getLogger(__name__)
 
@@ -354,9 +355,18 @@ async def get_domain_overview(
 ):
     """
     Get overview for specific domain with daily aggregated stats
-    Includes data for charts similar to Cloudflare
+    Includes data for charts similar to Cloudflare and current DMARC DNS record status/settings.
     """
     try:
+        # Resolve DMARC record from DNS: use cache first, else live check
+        dns_checks = get_cached_dns_check(db, domain)
+        if dns_checks and dns_checks.get('dmarc'):
+            dmarc_record = dns_checks['dmarc'].copy()
+            if 'settings' not in dmarc_record and dmarc_record.get('record'):
+                dmarc_record['settings'] = parse_dmarc_record_tags(dmarc_record['record'])
+        else:
+            dmarc_record = await check_dmarc_record(domain)
+
         cutoff_timestamp = int((datetime.now() - timedelta(days=days)).timestamp())
         
         reports = db.query(DMARCReport).filter(
@@ -377,7 +387,8 @@ async def get_domain_overview(
                     'dmarc_fail': 0,
                     'unique_ips': 0,
                     'unique_reporters': 0
-                }
+                },
+                'dmarc_record': dmarc_record
             }
         
         latest_report = max(reports, key=lambda r: r.end_date)
@@ -445,7 +456,8 @@ async def get_domain_overview(
                 'dmarc_fail': total_dmarc_fail,
                 'unique_ips': len(all_ips),
                 'unique_reporters': len(all_reporters)
-            }
+            },
+            'dmarc_record': dmarc_record
         }
         
     except Exception as e:

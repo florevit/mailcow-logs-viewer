@@ -27,6 +27,16 @@ router = APIRouter()
 _state_store: Dict[str, str] = {}
 
 
+@router.get("/auth/verify")
+async def verify_basic_auth():
+    """
+    Verify Basic Auth credentials.
+    Not in public_paths: middleware validates credentials and returns 401 if invalid.
+    Used by the login form to test username/password before redirecting.
+    """
+    return {"verified": True}
+
+
 @router.get("/auth/provider-info")
 async def get_provider_info():
     """Get authentication provider information for frontend"""

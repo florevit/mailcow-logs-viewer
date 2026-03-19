@@ -235,9 +235,9 @@ When using email services (marketing, support desk, etc.):
 - **Subdomains**: Check if subdomain policy is needed
 
 ## Report Retention
-- Reports are stored according to your configured retention period
-- Default: 90 days
-- Older reports are automatically deleted to save space
+- Reports are stored according to your configured retention period (`DMARC_RETENTION_DAYS`)
+- Default: 60 days
+- Older DMARC and TLS reports are automatically deleted daily (cleanup job runs at 2:15 AM) to save space
 - Export reports before they're deleted if long-term analysis is needed
 
 ---

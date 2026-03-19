@@ -8,6 +8,7 @@ import re
 import httpx
 import socket
 import ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Set, Optional, List, Dict, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from .config import settings, set_cached_active_domains
 from .database import get_db_context, SessionLocal
 from .mailcow_api import mailcow_api
-from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation, DMARCSync, DomainDNSCheck, MailboxStatistics, AliasStatistics, MonitoredHost, BlacklistCheck
+from .models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation, DMARCSync, DomainDNSCheck, MailboxStatistics, AliasStatistics, MonitoredHost, BlacklistCheck, DMARCReport, DMARCRecord, TLSReport, TLSReportPolicy
 from .correlation import detect_direction, parse_postfix_message
 from .routers.domains import check_domain_dns, save_dns_check_to_db
 from .services.dmarc_imap_service import sync_dmarc_reports_from_imap
@@ -33,8 +34,77 @@ from .services.geoip_downloader import (
     get_geoip_status
 )
 from .services.geoip_downloader import is_license_configured
+from .services.dmarc_cache import clear_dmarc_cache
 
 logger = logging.getLogger(__name__)
+
+# Thread pool executor for blocking I/O operations (can be replaced when scheduler_workers changes)
+_thread_pool_executor = ThreadPoolExecutor(max_workers=settings.scheduler_workers, thread_name_prefix="imap_sync")
+
+
+def get_thread_pool_executor():
+    """Return the current thread pool executor (used so it can be updated when settings change)."""
+    return _thread_pool_executor
+
+
+def reschedule_interval_jobs():
+    """
+    Reschedule jobs that use dynamic intervals (fetch_interval, correlation_check_interval, dmarc_imap_interval).
+    Call after reload_settings() so interval changes take effect without restart.
+    """
+    global _thread_pool_executor
+    if not scheduler.running:
+        return
+    try:
+        # Reschedule fetch_logs
+        scheduler.add_job(
+            fetch_all_logs,
+            trigger=IntervalTrigger(seconds=settings.fetch_interval),
+            id='fetch_logs',
+            name='Fetch mailcow Logs',
+            replace_existing=True,
+            max_instances=1
+        )
+        # Reschedule complete_correlations
+        scheduler.add_job(
+            complete_incomplete_correlations,
+            trigger=IntervalTrigger(seconds=settings.correlation_check_interval),
+            id='complete_correlations',
+            name='Complete Correlations',
+            replace_existing=True,
+            max_instances=1
+        )
+        # Reschedule update_final_status
+        scheduler.add_job(
+            update_final_status_for_correlations,
+            trigger=IntervalTrigger(seconds=settings.correlation_check_interval),
+            id='update_final_status',
+            name='Update Final Status',
+            replace_existing=True,
+            max_instances=1
+        )
+        # Reschedule DMARC IMAP sync if enabled
+        if settings.dmarc_imap_enabled:
+            scheduler.add_job(
+                dmarc_imap_sync_job,
+                IntervalTrigger(seconds=settings.dmarc_imap_interval),
+                id='dmarc_imap_sync',
+                name='DMARC IMAP Sync',
+                replace_existing=True
+            )
+        # Update thread pool size if scheduler_workers changed
+        new_workers = getattr(settings, 'scheduler_workers', 4)
+        if _thread_pool_executor._max_workers != new_workers:
+            old_executor = _thread_pool_executor
+            _thread_pool_executor = ThreadPoolExecutor(max_workers=new_workers, thread_name_prefix="imap_sync")
+            try:
+                old_executor.shutdown(wait=False)
+            except Exception:
+                pass
+            logger.info(f"Scheduler thread pool updated to {new_workers} workers")
+        logger.info(f"Rescheduled interval jobs: fetch={settings.fetch_interval}s, correlation={settings.correlation_check_interval}s")
+    except Exception as e:
+        logger.warning("Failed to reschedule interval jobs: %s", e)
 
 # Job execution tracking
 job_status = {
@@ -43,6 +113,7 @@ job_status = {
     'update_final_status': {'last_run': None, 'status': 'idle', 'error': None},
     'expire_correlations': {'last_run': None, 'status': 'idle', 'error': None},
     'cleanup_logs': {'last_run': None, 'status': 'idle', 'error': None},
+    'cleanup_dmarc_reports': {'last_run': None, 'status': 'idle', 'error': None},
     'check_app_version': {'last_run': None, 'status': 'idle', 'error': None},
     'dns_check': {'last_run': None, 'status': 'idle', 'error': None},
     'update_geoip': {'last_run': None, 'status': 'idle', 'error': None},
@@ -53,6 +124,9 @@ job_status = {
     'send_weekly_summary': {'last_run': None, 'status': 'idle', 'error': None},
     'sync_transports': {'last_run': None, 'status': 'idle', 'error': None},
 }
+
+# Number of hosts that were listed on actionable blacklists in the previous blacklist check run (for "cleared" notification)
+_blacklist_last_listed_actionable_count = 0
 
 def update_job_status(job_name: str, status: str, error: str = None):
     """Update job execution status"""
@@ -74,6 +148,44 @@ app_version_cache = {
     "update_available": False,
     "changelog": None
 }
+
+def is_version_newer(latest_version: str, current_version: str) -> bool:
+    """
+    Compare two semantic versions and return True if latest_version is newer than current_version.
+    
+    Uses packaging.version.Version for proper semantic version comparison if available,
+    otherwise falls back to simple numeric comparison.
+    
+    Args:
+        latest_version: The version to check if it's newer (e.g., "2.2.6")
+        current_version: The current version to compare against (e.g., "2.2.5")
+    
+    Returns:
+        True if latest_version > current_version, False otherwise
+    """
+    try:
+        # Try using packaging.version.Version for robust semantic version comparison
+        from packaging.version import Version
+        return Version(latest_version) > Version(current_version)
+    except ImportError:
+        # Fallback: simple numeric comparison for major.minor.patch format
+        logger.warning("packaging module not available, using fallback version comparison")
+        try:
+            def parse_version(version_str: str) -> tuple:
+                """Parse version string into tuple of integers"""
+                # Remove any non-numeric suffixes (e.g., "2.2.6-dev" -> "2.2.6")
+                version_str = re.sub(r'[^0-9.].*$', '', version_str)
+                parts = version_str.split('.')
+                # Convert to integers, pad with zeros if needed
+                return tuple(int(part) for part in parts[:3] + ['0'] * (3 - len(parts[:3])))
+            
+            latest_parts = parse_version(latest_version)
+            current_parts = parse_version(current_version)
+            return latest_parts > current_parts
+        except (ValueError, AttributeError) as e:
+            logger.error(f"Failed to compare versions '{latest_version}' and '{current_version}': {e}")
+            # If comparison fails, default to False (no update available)
+            return False
 
 async def check_app_version_update():
     """
@@ -114,10 +226,11 @@ async def check_app_version_update():
                 app_version_cache["latest_version"] = latest_version
                 app_version_cache["changelog"] = changelog
                 
-                # Compare versions (simple string comparison)
-                app_version_cache["update_available"] = current_version != latest_version
+                # Compare versions (proper semantic version comparison)
+                # Only show update available if latest_version is actually newer than current_version
+                app_version_cache["update_available"] = is_version_newer(latest_version, current_version)
                 
-                logger.info(f"App version check: Current={current_version}, Latest={latest_version}")
+                logger.info(f"App version check: Current={current_version}, Latest={latest_version}, Update Available={app_version_cache['update_available']}")
                 update_job_status('check_app_version', 'success')
             else:
                 logger.warning(f"GitHub API returned status {response.status_code}")
@@ -1168,11 +1281,13 @@ async def update_geoip_database():
 async def check_monitored_hosts_job(force: bool = False, send_notification: bool = True):
     """
     Background job: Check all monitored hosts against DNS blacklists
-    Sends aggregated email notification if any host is listed (and send_notification=True)
+    Sends aggregated email notification if any host is listed (and send_notification=True).
+    Sends notification when all hosts are cleared from actionable blacklists (were listed, now clear).
     Args:
         force: If True, bypass cache and force fresh check
         send_notification: If True, send email on failure. Defaults to True.
     """
+    global _blacklist_last_listed_actionable_count
     update_job_status('blacklist_check', 'running')
     
     try:
@@ -1286,23 +1401,19 @@ async def check_monitored_hosts_job(force: bool = False, send_notification: bool
 
             logger.info(f"Blacklist check complete for {total_checks} hosts. {len(listed_hosts)} listed.")
             
-            # Determine if we should alert
-            should_alert = False
-            if listed_hosts and send_notification:
-                # Check if any listed host has an ACTIONABLE blacklist (not in IGNORED_NOTIFICATION_BLACKLISTS)
-                for host_data in listed_hosts:
-                    results = host_data.get('results', {}).get('results', [])
-                    for res in results:
-                        if res.get('listed'):
-                            bl_name = res.get('name')
-                            if bl_name not in IGNORED_NOTIFICATION_BLACKLISTS:
-                                should_alert = True
-                                break
-                    if should_alert:
+            # Count hosts that are listed on at least one actionable blacklist (for "listed", "cleared", "improved" notifications)
+            actionable_listed_hosts = []
+            for host_data in listed_hosts:
+                results = host_data.get('results', {}).get('results', [])
+                for res in results:
+                    if res.get('listed') and res.get('name') not in IGNORED_NOTIFICATION_BLACKLISTS:
+                        actionable_listed_hosts.append(host_data)
                         break
-                
-                if not should_alert:
-                     logger.info("Hosts are listed, but only on ignored blacklists (e.g. UCEPROTECT). Suppressing notification.")
+            actionable_count = len(actionable_listed_hosts)
+            should_alert = actionable_count > 0
+            prev_listed = _blacklist_last_listed_actionable_count
+            if listed_hosts and send_notification and not should_alert:
+                logger.info("Hosts are listed, but only on ignored blacklists (e.g. UCEPROTECT). Suppressing notification.")
 
             # Send notification if ANY server is listed AND notification is enabled AND should_alert is True
             if listed_hosts and send_notification and should_alert:
@@ -1402,7 +1513,63 @@ async def check_monitored_hosts_job(force: bool = False, send_notification: bool
                     logger.error("Blacklist alert: No notification email configured (both blacklist_alert_email and admin_email are missing)")
             elif listed_hosts and not send_notification:
                 logger.info(f"Blacklist check completed with listed hosts ({len(listed_hosts)}), but notification is suppressed (by job param).")
-            
+
+            # Notify when count decreased: cleared (X→0) or improved (X→Y, Y>0)
+            if prev_listed > actionable_count and send_notification:
+                blacklist_alert_email = settings.blacklist_alert_email if hasattr(settings, 'blacklist_alert_email') else None
+                notification_email = get_notification_email(blacklist_alert_email)
+                if notification_email:
+                    if actionable_count == 0:
+                        subject = "✅ Blacklist Cleared – All Monitored Hosts Are Off Blacklists"
+                        host_list = ", ".join(h["hostname"] for h in monitored_hosts)
+                        text_content = (
+                            "All monitored hosts are no longer listed on any (actionable) blacklists.\n\n"
+                            f"Monitored hosts: {host_list}\n\n"
+                            "This is an automated notification from mailcow Logs Viewer."
+                        )
+                        html_content = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.5;">
+    <h2 style="color: #16a34a;">✅ Blacklist Cleared</h2>
+    <p>All monitored hosts are no longer listed on any (actionable) blacklists.</p>
+    <p><strong>Monitored hosts:</strong> {host_list}</p>
+    <hr style="margin-top: 30px;">
+    <p style="color: #999; font-size: 12px;">This is an automated notification from mailcow Logs Viewer.</p>
+    </body>
+    </html>
+    """
+                    else:
+                        subject = f"📉 Blacklist Improved – {prev_listed} → {actionable_count} Host(s) Listed"
+                        still_listed = ", ".join(h["hostname"] for h in actionable_listed_hosts)
+                        text_content = (
+                            f"Fewer hosts are now listed on (actionable) blacklists.\n\n"
+                            f"Previously: {prev_listed} host(s) listed.\n"
+                            f"Now: {actionable_count} host(s) listed.\n\n"
+                            f"Still listed: {still_listed}\n\n"
+                            "This is an automated notification from mailcow Logs Viewer."
+                        )
+                        html_content = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; padding: 20px; line-height: 1.5;">
+    <h2 style="color: #2563eb;">📉 Blacklist Improved</h2>
+    <p>Fewer hosts are now listed on (actionable) blacklists.</p>
+    <p><strong>Previously:</strong> {prev_listed} host(s) listed.</p>
+    <p><strong>Now:</strong> {actionable_count} host(s) listed.</p>
+    <p><strong>Still listed:</strong> {still_listed}</p>
+    <hr style="margin-top: 30px;">
+    <p style="color: #999; font-size: 12px;">This is an automated notification from mailcow Logs Viewer.</p>
+    </body>
+    </html>
+    """
+                    sent = send_notification_email(notification_email, subject, text_content, html_content)
+                    if sent:
+                        logger.info(f"Blacklist count change notification sent to {notification_email} (was {prev_listed}, now {actionable_count})")
+                    else:
+                        logger.error(f"Failed to send blacklist count change notification to {notification_email}")
+                else:
+                    logger.error("Blacklist count change: No notification email configured.")
+
+            _blacklist_last_listed_actionable_count = actionable_count
             
             update_job_status('blacklist_check', 'success')
 
@@ -1445,8 +1612,13 @@ async def dmarc_imap_sync_job():
     try:
         logger.info("Starting DMARC IMAP sync...")
         
-        # Execute the actual IMAP sync logic
-        result = sync_dmarc_reports_from_imap(sync_type='auto')
+        # Execute the actual IMAP sync logic in thread pool to avoid blocking event loop
+        # This prevents the application from freezing during IMAP connection attempts
+        result = await asyncio.get_event_loop().run_in_executor(
+            _thread_pool_executor,
+            sync_dmarc_reports_from_imap,
+            'auto'
+        )
         
         if result.get('status') == 'error':
             error_msg = result.get('error_message', 'Unknown error')
@@ -1460,6 +1632,9 @@ async def dmarc_imap_sync_job():
                     send_dmarc_error_notification(failed_emails, result.get('sync_id'))
                 except Exception as e:
                     logger.error(f"Failed to send error notification: {e}")
+        elif result.get('status') == 'disabled':
+            logger.debug("DMARC IMAP sync is disabled")
+            update_job_status('dmarc_imap_sync', 'disabled')
         else:
             # Sync finished successfully
             logger.info(f"DMARC IMAP sync completed: {result.get('reports_created', 0)} created")
@@ -1515,6 +1690,67 @@ async def cleanup_old_logs():
     except Exception as e:
         logger.error(f"[ERROR] Cleanup error: {e}")
         update_job_status('cleanup_logs', 'failed', str(e))
+
+
+async def cleanup_old_dmarc_reports():
+    """Delete DMARC and TLS reports older than DMARC_RETENTION_DAYS"""
+    update_job_status('cleanup_dmarc_reports', 'running')
+    try:
+        with get_db_context() as db:
+            cutoff_date = datetime.now(timezone.utc) - timedelta(
+                days=settings.dmarc_retention_days
+            )
+
+            # Old DMARC report IDs (by created_at)
+            old_dmarc_ids = [
+                row[0]
+                for row in db.query(DMARCReport.id).filter(
+                    DMARCReport.created_at < cutoff_date
+                ).all()
+            ]
+            dmarc_records_deleted = 0
+            if old_dmarc_ids:
+                dmarc_records_deleted = db.query(DMARCRecord).filter(
+                    DMARCRecord.dmarc_report_id.in_(old_dmarc_ids)
+                ).delete(synchronize_session=False)
+                dmarc_reports_deleted = db.query(DMARCReport).filter(
+                    DMARCReport.created_at < cutoff_date
+                ).delete()
+            else:
+                dmarc_reports_deleted = 0
+
+            # Old TLS report IDs (by created_at)
+            old_tls_ids = [
+                row[0]
+                for row in db.query(TLSReport.id).filter(
+                    TLSReport.created_at < cutoff_date
+                ).all()
+            ]
+            tls_policies_deleted = 0
+            if old_tls_ids:
+                tls_policies_deleted = db.query(TLSReportPolicy).filter(
+                    TLSReportPolicy.tls_report_id.in_(old_tls_ids)
+                ).delete(synchronize_session=False)
+                tls_reports_deleted = db.query(TLSReport).filter(
+                    TLSReport.created_at < cutoff_date
+                ).delete()
+            else:
+                tls_reports_deleted = 0
+
+            db.commit()
+
+            total = dmarc_records_deleted + dmarc_reports_deleted + tls_policies_deleted + tls_reports_deleted
+            if total > 0:
+                logger.info(
+                    f"[CLEANUP DMARC] Removed {dmarc_reports_deleted} DMARC reports (+ {dmarc_records_deleted} records), "
+                    f"{tls_reports_deleted} TLS reports (+ {tls_policies_deleted} policies) older than {settings.dmarc_retention_days} days"
+                )
+                clear_dmarc_cache(db)
+
+            update_job_status('cleanup_dmarc_reports', 'success')
+    except Exception as e:
+        logger.error(f"[ERROR] DMARC cleanup error: {e}")
+        update_job_status('cleanup_dmarc_reports', 'failed', str(e))
 
 
 def cleanup_blacklisted_data():
@@ -1650,25 +1886,28 @@ async def check_all_domains_dns_background():
 
 async def sync_local_domains():
     """
-    Sync local domains from mailcow API
-    Runs every 6 hours
+    Sync local domains from mailcow API (primary domains + alias domains).
+    Alias domains are included so
+    mail from them is correctly classified as outbound/local.
+    Runs every 6 hours.
     """
-
     logger.info("Starting background local domains sync...")
     update_job_status('sync_local_domains', 'running')
     
     try:
         active_domains = await mailcow_api.get_active_domains()
-        if active_domains:
-            set_cached_active_domains(active_domains)
-            logger.info(f"✓ Local domains synced: {len(active_domains)} domains")
+        alias_domains = await mailcow_api.get_alias_domains()
+        # Merge: primary domains + alias domains (no duplicates)
+        all_domains = list(dict.fromkeys((active_domains or []) + (alias_domains or [])))
+        if all_domains:
+            set_cached_active_domains(all_domains)
+            logger.info(f"✓ Local domains synced: {len(active_domains or [])} primary, {len(alias_domains or [])} alias → {len(all_domains)} total")
             update_job_status('sync_local_domains', 'success')
             return True
         else:
             logger.warning("⚠ No active domains retrieved")
-            update_job_status('sync_local_domains', 'failed', str(e))
+            update_job_status('sync_local_domains', 'failed', "No domains")
             return False
-    
     except Exception as e:
         logger.error(f"✗ Failed to sync local domains: {e}")
         update_job_status('sync_local_domains', 'failed', str(e))
@@ -1952,35 +2191,14 @@ async def sync_transports_job():
     """
     update_job_status('sync_transports', 'running')
     try:
-        if not settings.mailcow_api_key or not settings.mailcow_host:
+        if not settings.mailcow_api_key or not settings.mailcow_url:
             logger.warning("mailcow API not configured, skipping transport sync")
             update_job_status('sync_transports', 'failed', 'API not configured')
             return
 
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            # 1. Fetch Transports
-            transports_data = []
-            try:
-                resp = await client.get(
-                    f"{settings.mailcow_host}/api/v1/get/transport/all",
-                    headers={"X-API-Key": settings.mailcow_api_key}
-                )
-                if resp.status_code == 200:
-                    transports_data = resp.json()
-            except Exception as e:
-                logger.error(f"Failed to fetch transports: {e}")
-
-            # 2. Fetch Relay Hosts
-            relayhosts_data = []
-            try:
-                resp = await client.get(
-                    f"{settings.mailcow_host}/api/v1/get/relayhost/all",
-                    headers={"X-API-Key": settings.mailcow_api_key}
-                )
-                if resp.status_code == 200:
-                    relayhosts_data = resp.json()
-            except Exception as e:
-                logger.error(f"Failed to fetch relayhosts: {e}")
+        # Fetch Transports and Relay Hosts using mailcow_api
+        transports_data = await mailcow_api.get_transports()
+        relayhosts_data = await mailcow_api.get_relayhosts()
 
         # Process and Deduplicate
         hosts_to_monitor = {}  # hostname -> source
@@ -2086,30 +2304,9 @@ async def sync_transports_job():
             update_job_status('sync_transports', 'failed', 'API not configured')
             return
 
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            # 1. Fetch Transports
-            transports_data = []
-            try:
-                resp = await client.get(
-                    f"{settings.mailcow_url}/api/v1/get/transport/all",
-                    headers={"X-API-Key": settings.mailcow_api_key}
-                )
-                if resp.status_code == 200:
-                    transports_data = resp.json()
-            except Exception as e:
-                logger.error(f"Failed to fetch transports: {e}")
-
-            # 2. Fetch Relay Hosts
-            relayhosts_data = []
-            try:
-                resp = await client.get(
-                    f"{settings.mailcow_url}/api/v1/get/relayhost/all",
-                    headers={"X-API-Key": settings.mailcow_api_key}
-                )
-                if resp.status_code == 200:
-                    relayhosts_data = resp.json()
-            except Exception as e:
-                logger.error(f"Failed to fetch relayhosts: {e}")
+        # Fetch Transports and Relay Hosts using mailcow_api
+        transports_data = await mailcow_api.get_transports()
+        relayhosts_data = await mailcow_api.get_relayhosts()
 
         # Process and Deduplicate
         hosts_to_monitor = {}  # ip -> source_string
@@ -2326,6 +2523,15 @@ def start_scheduler():
             trigger=CronTrigger(hour=2, minute=0),
             id='cleanup_logs',
             name='Cleanup Old Logs',
+            replace_existing=True
+        )
+
+        # Job 6b: Cleanup old DMARC/TLS reports (daily at 2:15 AM)
+        scheduler.add_job(
+            cleanup_old_dmarc_reports,
+            trigger=CronTrigger(hour=2, minute=15),
+            id='cleanup_dmarc_reports',
+            name='Cleanup Old DMARC Reports',
             replace_existing=True
         )
         
