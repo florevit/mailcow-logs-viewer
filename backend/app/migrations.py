@@ -730,6 +730,105 @@ def add_geoip_fields_to_rspamd(db: Session):
         logger.error(f"Error adding GeoIP fields to rspamd_logs: {e}")
         db.rollback()
 
+def add_geoip_fields_to_netfilter(db: Session):
+    """Add GeoIP fields to netfilter_logs table"""
+    logger.info("Checking if GeoIP fields exist in netfilter_logs...")
+    
+    try:
+        result = db.execute(text("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='netfilter_logs' 
+            AND column_name='country_code'
+        """))
+        
+        if result.fetchone() is None:
+            logger.info("Adding GeoIP fields to netfilter_logs...")
+            
+            db.execute(text("""
+                ALTER TABLE netfilter_logs 
+                ADD COLUMN country_code VARCHAR(2),
+                ADD COLUMN country_name VARCHAR(100),
+                ADD COLUMN city VARCHAR(100),
+                ADD COLUMN asn VARCHAR(20),
+                ADD COLUMN asn_org VARCHAR(255);
+            """))
+            
+            db.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_netfilter_country 
+                ON netfilter_logs(country_code);
+            """))
+            
+            db.commit()
+            logger.info("✓ GeoIP fields added to netfilter_logs")
+        else:
+            logger.info("✓ GeoIP fields already exist in netfilter_logs")
+        
+    except Exception as e:
+        logger.error(f"Error adding GeoIP fields to netfilter_logs: {e}")
+        db.rollback()
+
+def backfill_geoip_netfilter(db: Session):
+    """Backfill GeoIP data for existing netfilter logs that have an IP but no country_code"""
+    from .services import geoip_service as _geoip_service
+    
+    if not _geoip_service.is_geoip_available():
+        return
+    
+    try:
+        result = db.execute(text("""
+            SELECT COUNT(*) FROM netfilter_logs 
+            WHERE ip IS NOT NULL AND country_code IS NULL
+        """))
+        count = result.scalar()
+        
+        if count == 0:
+            return
+        
+        logger.info(f"Backfilling GeoIP data for {count} netfilter logs...")
+        
+        # Process in batches
+        batch_size = 500
+        updated = 0
+        rows = db.execute(text("""
+            SELECT id, ip FROM netfilter_logs 
+            WHERE ip IS NOT NULL AND country_code IS NULL
+            LIMIT :limit
+        """), {"limit": batch_size}).fetchall()
+        
+        while rows:
+            for row in rows:
+                geo = _geoip_service.lookup_ip(row.ip)
+                if geo.get('country_code'):
+                    db.execute(text("""
+                        UPDATE netfilter_logs 
+                        SET country_code = :cc, country_name = :cn, city = :city, asn = :asn, asn_org = :ao
+                        WHERE id = :id
+                    """), {
+                        "cc": geo.get('country_code'),
+                        "cn": geo.get('country_name'),
+                        "city": geo.get('city'),
+                        "asn": geo.get('asn'),
+                        "ao": geo.get('asn_org'),
+                        "id": row.id
+                    })
+                    updated += 1
+            
+            db.commit()
+            
+            rows = db.execute(text("""
+                SELECT id, ip FROM netfilter_logs 
+                WHERE ip IS NOT NULL AND country_code IS NULL
+                LIMIT :limit
+            """), {"limit": batch_size}).fetchall()
+        
+        if updated > 0:
+            logger.info(f"✓ Backfilled GeoIP data for {updated} netfilter logs")
+    
+    except Exception as e:
+        logger.error(f"Error backfilling GeoIP for netfilter: {e}")
+        db.rollback()
+
 def create_dmarc_sync_table(db: Session):
     """
     Create dmarc_syncs table for tracking IMAP sync operations
@@ -894,6 +993,8 @@ def run_migrations():
         
         add_geoip_fields_to_dmarc(db)
         add_geoip_fields_to_rspamd(db)
+        add_geoip_fields_to_netfilter(db)
+        backfill_geoip_netfilter(db)
         
         if removed > 0:
             logger.info(f"Migration complete: Cleaned up {removed} duplicate correlations")

@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] - 2026-03-31
+
+### Added
+
+#### Click-to-Copy for Important Data
+- **Click-to-copy on key data fields across the application**: Hovering over copyable values reveals a small clipboard icon; clicking copies the value to clipboard with visual feedback (checkmark animation) and a "Copied!" toast notification
+
+#### Date Range Filter on Messages Page
+- **Date range picker for filtering messages by time period**: Same dropdown picker pattern as the Mailbox Statistics page
+  - **Quick Select presets**: All Time (default), Today, 7 Days, 30 Days, 90 Days
+  - **Custom Range**: Manual From/To date picker with validation
+
+#### Security Events Chart by Country
+- **Stacked horizontal bar chart** on the Security page showing ban, warning, and unban events grouped by country
+
+#### Fail2Ban Settings & Editing
+- **Fail2Ban configuration viewer on Security page**: Two new collapsible panels display the current Fail2Ban configuration fetched live from the mailcow API
+  - **Fail2ban Settings**
+  - **Fail2ban IP Lists**
+  - Settings are fetched once per session and cached in the frontend
+  - Both panels are collapsed by default to keep the Security page clean
+- **Fail2Ban settings editing**: When a Read-Write API key is configured, users can edit Fail2Ban settings and IP lists directly from the UI
+  - Fields start **disabled** — an "Edit Settings" / "Edit IP Lists" button must be clicked first to prevent accidental changes
+  - Save sends all parameters to mailcow's `POST /api/v1/edit/fail2ban` endpoint
+  - Warning displayed when no Read-Write API key is configured
+
+#### Read-Write API Key (Dual-Key Architecture)
+- **New optional `MAILCOW_API_KEY_RW` environment variable** for write operations (editing Fail2Ban, future edit features)
+  - The existing `MAILCOW_API_KEY` remains read-only and is used for all data retrieval
+  - Write operations require the separate Read-Write key for security separation
+  - If no RW key is configured, edit controls are disabled in the UI
+
+#### Settings Improvements
+- **Default value comparison**: Settings fields now show whether they differ from their default value
+  - Fields changed from default get an **amber border** highlight
+  - **"Reset to default (value)"** button appears on changed fields, showing what the default is
+  - **"Clear"** button appears on user-specific fields (credentials, connection details, feature toggles) that have a value
+  - User-specific settings (auth, SMTP, IMAP, OAuth2 credentials, etc.) show plain "Clear" instead of "Reset to default" since their values are inherently per-deployment
+- **Settings field clearing fixed**: Sensitive fields (API keys, passwords) can now be properly cleared — previously, clearing a field was silently ignored
+
+### Technical
+
+#### New API Endpoints
+```
+GET  /api/fail2ban           - Get Fail2Ban configuration from mailcow (real-time proxy)
+POST /api/fail2ban           - Update Fail2Ban configuration (requires RW API key)
+GET  /api/fail2ban/rw-status - Check if Read-Write API key is configured
+```
+
+#### Settings API Changes
+- `GET /api/settings` and `GET /api/settings/info` now include `default_config` in the response — a map of each editable key to its default value (or `null` for required fields with no default)
+- `PUT /api/settings` now uses `********` as the "unchanged" sentinel for sensitive keys; empty string properly clears the value
+
+---
+
 ## [2.3.2] - 2026-03-25
 
 ### Added

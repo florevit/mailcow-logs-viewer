@@ -25,6 +25,7 @@ When authentication is enabled, all API endpoints (except public endpoints liste
    - [Postfix Logs](#postfix-logs)
    - [Rspamd Logs](#rspamd-logs)
    - [Netfilter Logs](#netfilter-logs)
+   - [Fail2Ban Configuration](#fail2ban-configuration)
 9. [Queue & Quarantine](#queue--quarantine)
 10. [Statistics](#statistics)
 11. [Status](#status)
@@ -1472,6 +1473,102 @@ Get Netfilter authentication failure logs.
       "action": "warning"
     }
   ]
+}
+```
+
+---
+
+### Fail2Ban Configuration
+
+#### GET /fail2ban
+
+Get current Fail2Ban configuration from mailcow (real-time proxy to `/api/v1/get/fail2ban`).
+
+**Response:**
+```json
+{
+  "ban_time": 1800,
+  "ban_time_increment": false,
+  "max_ban_time": 86400,
+  "netban_ipv4": 32,
+  "netban_ipv6": 128,
+  "max_attempts": 10,
+  "retry_window": 600,
+  "manage_external": 0,
+  "whitelist": "127.0.0.1/8\n10.0.0.0/8",
+  "blacklist": "",
+  "perm_bans": [],
+  "active_bans": [...]
+}
+```
+
+**Response Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ban_time` | int | Ban duration in seconds |
+| `ban_time_increment` | bool | Whether ban time increases with each offense |
+| `max_ban_time` | int | Maximum ban duration in seconds (when increment enabled) |
+| `netban_ipv4` | int | IPv4 subnet size for banning (e.g., 32 = single IP) |
+| `netban_ipv6` | int | IPv6 subnet size for banning |
+| `max_attempts` | int | Number of failed attempts before ban |
+| `retry_window` | int | Time window in seconds for counting attempts |
+| `manage_external` | int | Whether Fail2Ban is managed externally (0/1) |
+| `whitelist` | string | Newline-separated list of allowlisted IPs/networks |
+| `blacklist` | string | Newline-separated list of denylisted IPs/networks |
+| `perm_bans` | array | List of permanently banned IPs |
+| `active_bans` | array | List of currently active bans |
+
+**Error Responses:**
+- `503 Service Unavailable`: Could not reach the mailcow API
+
+#### POST /fail2ban
+
+Update Fail2Ban configuration on mailcow. Requires the Read-Write API key (`MAILCOW_API_KEY_RW`).
+
+**Request Body:**
+```json
+{
+  "attr": {
+    "ban_time": "86400",
+    "ban_time_increment": "1",
+    "max_ban_time": "86400",
+    "max_attempts": "5",
+    "retry_window": "600",
+    "netban_ipv4": "24",
+    "netban_ipv6": "64",
+    "whitelist": "127.0.0.1/8",
+    "blacklist": "10.100.6.5/32"
+  }
+}
+```
+
+> **Note:** All parameters must be sent in the request body, not just the ones that changed.
+
+**Response:**
+```json
+[
+  {
+    "type": "success",
+    "log": ["fail2ban", "edit", { ... }],
+    "msg": ["fail2ban_edit_ok"]
+  }
+]
+```
+
+**Error Responses:**
+- `400 Bad Request`: Invalid payload or mailcow rejected the update
+- `403 Forbidden`: Read-Write API key is not configured
+- `503 Service Unavailable`: Could not reach the mailcow API
+
+#### GET /fail2ban/rw-status
+
+Check whether the Read-Write API key is configured (used by frontend to show/hide edit controls).
+
+**Response:**
+```json
+{
+  "rw_configured": true
 }
 ```
 

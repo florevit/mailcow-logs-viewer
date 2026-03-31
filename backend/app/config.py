@@ -22,7 +22,11 @@ class Settings(BaseSettings):
     """Application settings"""
     
     mailcow_url: str = Field(..., description="mailcow instance URL")
-    mailcow_api_key: str = Field(..., description="mailcow API key")
+    mailcow_api_key: str = Field(..., description="mailcow API key (Read-Only)")
+    mailcow_api_key_rw: Optional[str] = Field(
+        default=None,
+        description="mailcow API key (Read-Write) for edit operations"
+    )
     mailcow_api_timeout: int = Field(default=30, description="API request timeout in seconds")
     mailcow_api_verify_ssl: bool = Field(
         default=True,

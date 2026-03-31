@@ -29,14 +29,24 @@ class MailcowAPI:
         """Update configuration from settings (supports dynamic reload)"""
         self.base_url = settings.mailcow_url
         self.api_key = settings.mailcow_api_key
+        self.api_key_rw = settings.mailcow_api_key_rw
         self.timeout = settings.mailcow_api_timeout
         self.verify_ssl = settings.mailcow_api_verify_ssl
         
-        # Setup headers
+        # Setup headers for read-only operations
         self.headers = {
             "X-API-Key": self.api_key,
             "Content-Type": "application/json"
         }
+        
+        # Setup headers for read-write operations
+        if self.api_key_rw:
+            self.headers_rw = {
+                "X-API-Key": self.api_key_rw,
+                "Content-Type": "application/json"
+            }
+        else:
+            self.headers_rw = None
     
     def reload_config(self):
         """Reload configuration from settings (call after settings are updated)"""
@@ -87,6 +97,60 @@ class MailcowAPI:
                 logger.error(f"Unexpected error for {url}: {e}")
                 raise MailcowAPIError(f"Unexpected error: {e}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10)
+    )
+    async def _make_rw_request(self, endpoint: str, method: str = "POST", **kwargs) -> Any:
+        """
+        Make HTTP request to mailcow API using the Read-Write API key.
+        Used exclusively for edit/update operations.
+        
+        Args:
+            endpoint: API endpoint (without base URL)
+            method: HTTP method (POST, PUT, DELETE, etc.)
+            **kwargs: Additional arguments for httpx
+        
+        Returns:
+            JSON response from API
+        
+        Raises:
+            MailcowAPIError: If request fails or RW key is not configured
+        """
+        if not self.headers_rw:
+            raise MailcowAPIError(
+                "Read-Write API key (MAILCOW_API_KEY_RW) is not configured. "
+                "Edit operations require a separate API key with write permissions."
+            )
+        
+        url = f"{self.base_url}{endpoint}"
+        
+        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl) as client:
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    headers=self.headers_rw,
+                    **kwargs
+                )
+                
+                if response.status_code == 401:
+                    raise MailcowAPIError("Read-Write API key authentication failed (401)")
+                
+                if response.status_code == 403:
+                    raise MailcowAPIError("Read-Write API key does not have sufficient permissions (403)")
+                
+                response.raise_for_status()
+                
+                if response.headers.get('content-type', '').startswith('application/json'):
+                    return response.json()
+                return response.text
+                
+            except httpx.HTTPStatusError as e:
+                raise MailcowAPIError(f"RW API request failed with status {e.response.status_code}: {e.response.text}")
+            except httpx.RequestError as e:
+                raise MailcowAPIError(f"RW API request failed: {str(e)}")
+
     async def get_postfix_logs(self, count: int = 500) -> List[Dict[str, Any]]:
         """
         Fetch Postfix logs from mailcow
@@ -577,6 +641,85 @@ class MailcowAPI:
         except MailcowAPIError as e:
             logger.error(f"Failed to fetch relayhosts: {e}")
             return []
+
+
+    async def get_fail2ban(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch Fail2Ban configuration from mailcow
+        
+        Returns:
+            Dictionary with Fail2Ban settings or None if not available
+        """
+        logger.info("Fetching Fail2Ban configuration")
+        try:
+            data = await self._make_request("/api/v1/get/fail2ban")
+            
+            # API returns a list with one element
+            if isinstance(data, list) and len(data) > 0:
+                logger.info("Retrieved Fail2Ban configuration")
+                return data[0]
+            elif isinstance(data, dict):
+                logger.info("Retrieved Fail2Ban configuration (dict format)")
+                return data
+            else:
+                logger.warning(f"Unexpected Fail2Ban response format: {type(data)}")
+                return None
+                
+        except MailcowAPIError as e:
+            logger.error(f"Failed to fetch Fail2Ban configuration: {e}")
+            return None
+
+    async def edit_fail2ban(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update Fail2Ban configuration on mailcow using the Read-Write API key.
+        
+        Args:
+            attrs: Dictionary of Fail2Ban attributes to update.
+                   Must include ALL parameters (not just changed ones).
+        
+        Returns:
+            Response from mailcow API
+        
+        Raises:
+            MailcowAPIError: If request fails or RW key is not configured
+        """
+        logger.info("Updating Fail2Ban configuration")
+        payload = {"attr": attrs}
+        data = await self._make_rw_request(
+            "/api/v1/edit/fail2ban",
+            method="POST",
+            json=payload
+        )
+        logger.info(f"Fail2Ban update response: {data}")
+        return data
+
+    async def unban_fail2ban(self, ip: str) -> Dict[str, Any]:
+        """
+        Unban an IP address in Fail2Ban on mailcow using the Read-Write API key.
+        
+        Args:
+            ip: IP address to unban
+        
+        Returns:
+            Response from mailcow API
+        
+        Raises:
+            MailcowAPIError: If request fails or RW key is not configured
+        """
+        logger.info(f"Unbanning IP {ip} from Fail2Ban")
+        payload = {"attr": {"ip": ip}}
+        data = await self._make_rw_request(
+            "/api/v1/delete/fail2ban",
+            method="POST",
+            json=payload
+        )
+        logger.info(f"Fail2Ban unban response: {data}")
+        return data
+
+    @property
+    def has_rw_key(self) -> bool:
+        """Check if a Read-Write API key is configured."""
+        return self.headers_rw is not None
 
 
 mailcow_api = MailcowAPI()

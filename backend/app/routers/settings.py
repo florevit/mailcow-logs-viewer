@@ -51,6 +51,24 @@ def _effective_config_for_editable(settings_obj: Settings) -> Dict[str, Any]:
     return out
 
 
+def _get_field_defaults() -> Dict[str, Any]:
+    """Extract default values from the Settings model for editable keys.
+    Returns None for required fields (no default)."""
+    from pydantic_core import PydanticUndefined
+    defaults = {}
+    for key in EDITABLE_SETTING_KEYS:
+        field_info = Settings.model_fields.get(key)
+        if field_info is None:
+            continue
+        if field_info.default is PydanticUndefined:
+            defaults[key] = None  # Required field, no default
+        elif key in _SENSITIVE_SETTING_KEYS:
+            defaults[key] = ""  # Don't expose actual default for sensitive keys
+        else:
+            defaults[key] = field_info.default
+    return defaults
+
+
 def format_datetime_utc(dt: Optional[datetime]) -> Optional[str]:
     """Format datetime with UTC timezone indicator"""
     if dt is None:
@@ -344,6 +362,7 @@ async def get_settings_info(db: Session = Depends(get_db)):
         # When UI editing is enabled, include full editable config and migration status
         if settings.edit_settings_via_ui_enabled:
             result["editable_config"] = _effective_config_for_editable(settings)
+            result["default_config"] = _get_field_defaults()
             result["settings_migrated"] = has_config_overrides_in_db(db)
         return result
         
@@ -375,6 +394,7 @@ async def get_editable_settings(db: Session = Depends(get_db)):
         "settings_edit_via_ui_enabled": settings.edit_settings_via_ui_enabled,
         "settings_migrated": has_config_overrides_in_db(db),
         "configuration": _effective_config_for_editable(settings),
+        "default_config": _get_field_defaults(),
         "env_locked_keys": env_locked,
     }
 
@@ -388,9 +408,10 @@ async def update_settings(body: Dict[str, Any], db: Session = Depends(get_db)):
     if not settings.edit_settings_via_ui_enabled:
         raise HTTPException(status_code=403, detail="Editing settings from UI is disabled. Set SETTINGS_EDIT_VIA_UI_ENABLED=true to enable.")
     allowed = {k: v for k, v in body.items() if k in EDITABLE_SETTING_KEYS}
-    # For sensitive keys, empty string means "do not change" - omit from payload
+    # For sensitive keys, mask placeholder means "do not change" - omit from payload
+    # Empty string means "clear this value" and should be kept
     for sk in _SENSITIVE_SETTING_KEYS:
-        if sk in allowed and (allowed[sk] is None or (isinstance(allowed[sk], str) and allowed[sk].strip() == "")):
+        if sk in allowed and isinstance(allowed[sk], str) and allowed[sk] == MASK_PLACEHOLDER:
             del allowed[sk]
     if not allowed:
         reload_settings(db)

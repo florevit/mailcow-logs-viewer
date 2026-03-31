@@ -571,6 +571,13 @@ def parse_netfilter_message(message: str, priority: Optional[str] = None) -> Dic
             ip_part = cidr_match.group(1).split('/')[0]
             result['ip'] = ip_part
     
+    # Fallback: extract any IP address (with optional CIDR) from the message
+    # Catches denylist messages like "Added host/network 175.157.10.170/32 to denylist"
+    if not result.get('ip'):
+        generic_ip = re.search(r'(\d+\.\d+\.\d+\.\d+)(?:/\d+)?', message)
+        if generic_ip:
+            result['ip'] = generic_ip.group(1)
+    
     username_match = re.search(r'sasl_username=([^\s,\)]+)', message)
     if username_match:
         result['username'] = username_match.group(1)
@@ -591,6 +598,12 @@ def parse_netfilter_message(message: str, priority: Optional[str] = None) -> Dic
     # Check for "unbanning" or "unban" as separate words
     if re.search(r'\bunban(?:ning)?\b', message_lower):
         result['action'] = 'unban'
+    # "Removed host/network ... from denylist" = unban
+    elif 'removed' in message_lower and 'denylist' in message_lower:
+        result['action'] = 'unban'
+    # "Added host/network ... to denylist" = ban
+    elif 'added' in message_lower and 'denylist' in message_lower:
+        result['action'] = 'ban'
     # Check for "banning" or "banned" as separate words (but not if it's part of "unbanning")
     elif re.search(r'\bban(?:ning|ned)\b', message_lower):
         if 'more attempts' in message_lower:
@@ -663,6 +676,15 @@ async def fetch_and_store_netfilter():
                         attempts_left=parsed.get('attempts_left'),
                         raw_data=log_entry
                     )
+                    
+                    # Enrich with GeoIP data at import time
+                    if geoip_service.is_geoip_available() and netfilter_log.ip:
+                        geo_info = geoip_service.lookup_ip(netfilter_log.ip)
+                        netfilter_log.country_code = geo_info.get('country_code')
+                        netfilter_log.country_name = geo_info.get('country_name')
+                        netfilter_log.city = geo_info.get('city')
+                        netfilter_log.asn = geo_info.get('asn')
+                        netfilter_log.asn_org = geo_info.get('asn_org')
                     
                     db.add(netfilter_log)
                     seen_netfilter.add(unique_id)

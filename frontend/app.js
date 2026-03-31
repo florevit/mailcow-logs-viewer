@@ -913,25 +913,177 @@ function renderNetfilterData(data) {
         countEl.textContent = data.total ? `(${data.total.toLocaleString()} results)` : '';
     }
 
+    // Build a set of currently banned IPs for quick lookup
+    const activeBannedIPs = new Set();
+    if (fail2banActiveBans && fail2banActiveBans.length > 0) {
+        fail2banActiveBans.forEach(function(ban) {
+            if (ban.ip) activeBannedIPs.add(ban.ip);
+            if (ban.network) {
+                // Extract base IP from network notation like "1.2.3.0/24"
+                const baseIp = ban.network.split('/')[0];
+                activeBannedIPs.add(baseIp);
+                activeBannedIPs.add(ban.network);
+            }
+        });
+    }
+
     container.innerHTML = `
         <div class="space-y-3">
-            ${uniqueLogs.map(log => `
+            ${uniqueLogs.map(log => {
+                const isBan = log.action === 'ban' || log.action === 'banned';
+                const isWarningOrUnban = log.action === 'warning' || log.action === 'unban';
+                // Check if IP is in the blacklist (with or without /32)
+                const ipInBlacklist = log.ip && fail2banBlacklist.some(entry => entry === log.ip || entry === log.ip + '/32');
+                // Show unban if: banned OR already in blacklist
+                const showUnban = fail2banRwConfigured && log.ip && (isBan || ipInBlacklist);
+                // Show ban if: warning/unban AND NOT already in blacklist
+                const showBan = fail2banRwConfigured && log.ip && isWarningOrUnban && !ipInBlacklist;
+                // GeoIP rendering
+                let geoHtml = '';
+                if (log.country_code) {
+                    const flagUrl = getFlagUrl(log.country_code, '16x12');
+                    let geoParts = [];
+                    if (log.country_name && flagUrl) {
+                        geoParts.push('<img src="' + flagUrl + '" alt="' + escapeHtml(log.country_name) + '" style="width:16px;height:12px;display:inline-block;vertical-align:middle" onerror="this.style.display=\'none\'"> ' + escapeHtml(log.country_name));
+                    }
+                    if (log.city) geoParts.push(escapeHtml(log.city));
+                    if (log.asn_org) geoParts.push('(' + escapeHtml(log.asn_org) + ')');
+                    if (geoParts.length > 0) {
+                        geoHtml = '<div class="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center gap-1 flex-wrap">' +
+                            '<svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>' +
+                            geoParts.join(' ') + '</div>';
+                    }
+                }
+                return `
                 <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
                     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
                         <div class="flex flex-wrap items-center gap-2">
-                            <span class="font-mono text-sm font-semibold text-gray-900 dark:text-white">${log.ip || '-'}</span>
-                            ${log.username && log.username !== '-' ? `<span class="text-sm text-blue-600 dark:text-blue-400">${escapeHtml(log.username)}</span>` : ''}
+                            <span class="font-mono text-sm font-semibold text-gray-900 dark:text-white">${log.ip ? copyableText(log.ip) : '-'}</span>
+                            ${log.username && log.username !== '-' ? `<span class="text-sm text-blue-600 dark:text-blue-400">${copyableText(log.username)}</span>` : ''}
                             <span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${getActionClass(log.action)}">${getActionLabel(log.action)}</span>
                             ${log.attempts_left !== null && log.attempts_left !== undefined ? `<span class="text-xs text-gray-500 dark:text-gray-400">${log.attempts_left} attempts left</span>` : ''}
                         </div>
-                        <span class="text-xs text-gray-500 dark:text-gray-400">${formatTime(log.time)}</span>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-gray-500 dark:text-gray-400">${formatTime(log.time)}</span>
+                            ${showUnban ? `<button onclick="unbanIP('${escapeHtml(log.ip)}', this)" class="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-md bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-800/60 border border-green-300 dark:border-green-700 transition-colors cursor-pointer" title="Unban ${escapeHtml(log.ip)}/32"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"></path></svg>Unban</button>` : ''}
+                            ${showBan ? `<button onclick="banIP('${escapeHtml(log.ip)}', this)" class="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-md bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-800/60 border border-red-300 dark:border-red-700 transition-colors cursor-pointer" title="Ban ${escapeHtml(log.ip)}/32"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>Ban</button>` : ''}
+                        </div>
                     </div>
                     <p class="text-sm text-gray-700 dark:text-gray-300 break-words">${escapeHtml(log.message || '-')}</p>
-                </div>
-            `).join('')}
+                    ${geoHtml}
+                </div>`;
+            }).join('')}
         </div>
         ${renderPagination('netfilter', data.page, data.pages)}
     `;
+}
+
+async function unbanIP(ip, btnEl) {
+    const ipWithMask = ip.includes('/') ? ip : ip + '/32';
+    if (!confirm('Unban IP ' + ipWithMask + '?')) return;
+    try {
+        if (btnEl) {
+            btnEl.disabled = true;
+            btnEl.textContent = 'Unbanning...';
+        }
+        const res = await authenticatedFetch('/api/fail2ban/unban', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ipWithMask })
+        });
+        const result = await res.json();
+        if (res.ok && result.status === 'success') {
+            showToast('IP ' + ip + ' unbanned successfully', 'success');
+            // Refresh fail2ban data and netfilter logs
+            fail2banSettingsLoaded = false;
+            fail2banActiveBans = null;
+            loadFail2BanSettings();
+            smartRefreshNetfilter();
+        } else {
+            showToast('Failed to unban: ' + (result.msg || result.detail || 'Unknown error'), 'error');
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.textContent = 'Unban';
+            }
+        }
+    } catch (err) {
+        showToast('Failed to unban IP: ' + err.message, 'error');
+        if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.textContent = 'Unban';
+        }
+    }
+}
+
+async function banIP(ip, btnEl) {
+    const ipWithMask = ip.includes('/') ? ip : ip + '/32';
+    if (!confirm(`Are you sure you want to permanently ban ${ipWithMask}?\n\nThis will add the IP to the Fail2Ban blacklist.`)) return;
+
+    if (btnEl) {
+        btnEl.disabled = true;
+        btnEl.innerHTML = '<span class="loading-spinner-sm"></span>Banning...';
+    }
+
+    try {
+        const response = await authenticatedFetch('/api/fail2ban/ban', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ipWithMask })
+        });
+
+        const result = await response.json();
+
+        if (result.status === 'success') {
+            showToast(`IP ${ip} added to blacklist`, 'success');
+            // Refresh fail2ban data and netfilter logs
+            fail2banSettingsLoaded = false;
+            fail2banActiveBans = null;
+            loadFail2BanSettings();
+            smartRefreshNetfilter();
+        } else {
+            showToast('Failed to ban: ' + (result.msg || result.detail || 'Unknown error'), 'error');
+            if (btnEl) {
+                btnEl.disabled = false;
+                btnEl.textContent = 'Ban';
+            }
+        }
+    } catch (err) {
+        showToast('Failed to ban IP: ' + err.message, 'error');
+        if (btnEl) {
+            btnEl.disabled = false;
+            btnEl.textContent = 'Ban';
+        }
+    }
+}
+
+async function loadNetfilterCountries() {
+    try {
+        const select = document.getElementById('netfilter-filter-country');
+        if (!select) return;
+        
+        const response = await authenticatedFetch('/api/logs/netfilter/countries');
+        if (!response.ok) return;
+        
+        const countries = await response.json();
+        
+        // Preserve current selection
+        const currentValue = select.value;
+        
+        // Clear existing options except the "All Countries" default
+        select.innerHTML = '<option value="">All Countries</option>';
+        
+        for (const c of countries) {
+            const opt = document.createElement('option');
+            opt.value = c.code;
+            opt.textContent = `${c.name || c.code}`;
+            select.appendChild(opt);
+        }
+        
+        // Restore selection
+        if (currentValue) select.value = currentValue;
+    } catch (err) {
+        console.error('Failed to load netfilter countries:', err);
+    }
 }
 
 // Smart refresh for Netfilter
@@ -1140,6 +1292,9 @@ function switchTab(tab, params = {}) {
             break;
         case 'netfilter':
             loadNetfilterLogs(1);
+            loadFail2BanSettings();
+            loadNetfilterCountries();
+            loadSecurityCountryChart(30);
             break;
         case 'queue':
             loadQueue();
@@ -1564,7 +1719,8 @@ function applyNetfilterFilters() {
     currentFilters.netfilter = {
         ip: document.getElementById('netfilter-filter-ip').value,
         username: document.getElementById('netfilter-filter-username').value,
-        action: document.getElementById('netfilter-filter-action').value
+        action: document.getElementById('netfilter-filter-action').value,
+        country_code: document.getElementById('netfilter-filter-country').value
     };
     currentPage.netfilter = 1;
     loadNetfilterLogs();
@@ -1574,9 +1730,225 @@ function clearNetfilterFilters() {
     document.getElementById('netfilter-filter-ip').value = '';
     document.getElementById('netfilter-filter-username').value = '';
     document.getElementById('netfilter-filter-action').value = '';
+    document.getElementById('netfilter-filter-country').value = '';
     currentFilters.netfilter = {};
     currentPage.netfilter = 1;
     loadNetfilterLogs();
+}
+
+let securityCountryChart = null;
+
+async function loadSecurityCountryChart(days = 30) {
+    // Update period button styles
+    document.querySelectorAll('.country-chart-period-btn').forEach(btn => {
+        btn.className = 'country-chart-period-btn px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors';
+    });
+    const activeBtn = document.getElementById(`country-chart-${days}d`);
+    if (activeBtn) {
+        activeBtn.className = 'country-chart-period-btn px-3 py-1.5 text-xs font-medium rounded-md border border-blue-500 bg-blue-500 text-white transition-colors';
+    }
+
+    try {
+        const response = await authenticatedFetch(`/api/logs/netfilter/stats/by-country?days=${days}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        const data = result.data || [];
+
+        const container = document.getElementById('country-chart-container');
+        const emptyMsg = document.getElementById('country-chart-empty');
+
+        // Filter out countries with 0 total (ban+warning+unban)
+        const filteredData = data.filter(d => (d.ban + d.warning + d.unban) > 0);
+
+        if (filteredData.length === 0) {
+            container.classList.add('hidden');
+            emptyMsg.classList.remove('hidden');
+            return;
+        }
+        container.classList.remove('hidden');
+        emptyMsg.classList.add('hidden');
+
+
+        // Preload flag images for chart labels
+        const flagImages = {};
+        const flagPromises = filteredData.map(d => {
+            const url = getFlagUrl(d.country_code, '24x18');
+            if (!url) return Promise.resolve();
+            return new Promise(resolve => {
+                const img = new Image();
+                img.onload = () => { flagImages[d.country_code] = img; resolve(); };
+                img.onerror = () => resolve();
+                img.src = url;
+            });
+        });
+        await Promise.all(flagPromises);
+
+
+        // Destroy old chart if exists
+        if (securityCountryChart) {
+            securityCountryChart.destroy();
+            securityCountryChart = null;
+        }
+
+        const isDark = document.documentElement.classList.contains('dark');
+        const gridColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+        const textColor = isDark ? '#d1d5db' : '#374151';
+
+        // Dataset visibility state: track which action types are shown
+        const datasetKeys = ['ban', 'warning', 'unban'];
+        const visibleSets = { ban: true, warning: true, unban: true };
+
+        const datasetColors = {
+            ban:     isDark ? 'rgba(239,68,68,0.8)' : 'rgba(220,38,38,0.8)',
+            warning: isDark ? 'rgba(251,191,36,0.8)' : 'rgba(217,119,6,0.8)',
+            unban:   isDark ? 'rgba(34,197,94,0.8)' : 'rgba(22,163,74,0.8)'
+        };
+        const datasetLabels = { ban: 'Ban', warning: 'Warning', unban: 'Unban' };
+
+        // Build chart data filtered by visible datasets
+        function buildChartData() {
+            // Filter: only keep countries that have > 0 events in any VISIBLE dataset
+            const visible = filteredData.filter(d => {
+                let sum = 0;
+                for (const key of datasetKeys) {
+                    if (visibleSets[key]) sum += d[key];
+                }
+                return sum > 0;
+            });
+
+            // Sort by visible total descending
+            visible.sort((a, b) => {
+                let sumA = 0, sumB = 0;
+                for (const key of datasetKeys) {
+                    if (visibleSets[key]) { sumA += a[key]; sumB += b[key]; }
+                }
+                return sumB - sumA;
+            });
+
+            return visible;
+        }
+
+        function updateChart() {
+            const visible = buildChartData();
+
+            if (visible.length === 0) {
+                container.classList.add('hidden');
+                emptyMsg.classList.remove('hidden');
+                return;
+            }
+            container.classList.remove('hidden');
+            emptyMsg.classList.add('hidden');
+
+            // Dynamic height
+            const chartHeight = Math.min(350, Math.max(120, visible.length * 32));
+            container.style.height = chartHeight + 'px';
+
+            // Update chart data in place
+            securityCountryChart.data.labels = visible.map(d => d.country_name);
+            datasetKeys.forEach((key, i) => {
+                securityCountryChart.data.datasets[i].data = visible.map(d => d[key]);
+            });
+
+            // Store visible data reference for flag plugin and tooltip
+            securityCountryChart._visibleData = visible;
+
+            securityCountryChart.update();
+        }
+
+        const initialVisible = buildChartData();
+
+        // Dynamic height
+        const chartHeight = Math.min(350, Math.max(120, initialVisible.length * 32));
+        container.style.height = chartHeight + 'px';
+
+        const ctx = document.getElementById('security-country-chart').getContext('2d');
+        securityCountryChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: initialVisible.map(d => d.country_name),
+                datasets: datasetKeys.map(key => ({
+                    label: datasetLabels[key],
+                    data: initialVisible.map(d => d[key]),
+                    backgroundColor: datasetColors[key],
+                    borderRadius: 3
+                }))
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: { color: textColor, padding: 15, usePointStyle: true, pointStyle: 'rectRounded' },
+                        onClick: (e, legendItem, legend) => {
+                            const key = datasetKeys[legendItem.datasetIndex];
+                            visibleSets[key] = !visibleSets[key];
+
+                            // Toggle the dataset hidden state
+                            const meta = legend.chart.getDatasetMeta(legendItem.datasetIndex);
+                            meta.hidden = !visibleSets[key];
+
+                            // Rebuild data with only countries that have visible events
+                            updateChart();
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            title: (items) => items[0].label,
+                            afterTitle: (items) => {
+                                const d = securityCountryChart._visibleData?.[items[0].dataIndex];
+                                if (!d) return '';
+                                let sum = 0;
+                                for (const key of datasetKeys) {
+                                    if (visibleSets[key]) sum += d[key];
+                                }
+                                return `Total: ${sum} events`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        stacked: true,
+                        grid: { color: gridColor },
+                        ticks: { color: textColor }
+                    },
+                    y: {
+                        stacked: true,
+                        grid: { display: false },
+                        ticks: { color: textColor, padding: 30 }
+                    }
+                },
+                layout: {
+                    padding: { left: 8 }
+                }
+            },
+            plugins: [{
+                id: 'flagIcons',
+                afterDraw: (chart) => {
+                    const yScale = chart.scales.y;
+                    if (!yScale) return;
+                    const visible = chart._visibleData || initialVisible;
+                    const ctx = chart.ctx;
+                    yScale.ticks.forEach((tick, i) => {
+                        const d = visible[i];
+                        if (!d) return;
+                        const flagImg = flagImages[d.country_code];
+                        if (!flagImg) return;
+                        const y = yScale.getPixelForTick(i);
+                        const xPos = yScale.right - 28;
+                        ctx.drawImage(flagImg, xPos, y - 6, 24, 18);
+                    });
+                }
+            }]
+        });
+
+        // Store initial visible data reference
+        securityCountryChart._visibleData = initialVisible;
+    } catch (e) {
+        console.error('Failed to load security country chart:', e);
+    }
 }
 
 async function loadNetfilterLogs(page = 1) {
@@ -1602,41 +1974,11 @@ async function loadNetfilterLogs(page = 1) {
         const data = await response.json();
         console.log('Netfilter data:', data);
 
-        if (!data.data || data.data.length === 0) {
-            container.innerHTML = '<p class="text-gray-500 dark:text-gray-400 text-center py-8">No logs found</p>';
-            const countEl = document.getElementById('security-count');
-            if (countEl) countEl.textContent = '';
-            return;
-        }
+        // Store in cache for smart refresh comparison
+        lastDataCache.netfilter = data;
 
-        // Deduplicate logs based on message + time + priority
-        const uniqueLogs = deduplicateNetfilterLogs(data.data);
-
-        // Update count display with total count from API (like Messages page)
-        const countEl = document.getElementById('security-count');
-        if (countEl) {
-            countEl.textContent = data.total ? `(${data.total.toLocaleString()} results)` : '';
-        }
-
-        container.innerHTML = `
-            <div class="space-y-3">
-                ${uniqueLogs.map(log => `
-                    <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition">
-                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-                            <div class="flex flex-wrap items-center gap-2">
-                                <span class="font-mono text-sm font-semibold text-gray-900 dark:text-white">${log.ip || '-'}</span>
-                                ${log.username && log.username !== '-' ? `<span class="text-sm text-blue-600 dark:text-blue-400">${escapeHtml(log.username)}</span>` : ''}
-                                <span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${getActionClass(log.action)}">${getActionLabel(log.action)}</span>
-                                ${log.attempts_left !== null && log.attempts_left !== undefined ? `<span class="text-xs text-gray-500 dark:text-gray-400">${log.attempts_left} attempts left</span>` : ''}
-                            </div>
-                            <span class="text-xs text-gray-500 dark:text-gray-400">${formatTime(log.time)}</span>
-                        </div>
-                        <p class="text-sm text-gray-700 dark:text-gray-300 break-words">${escapeHtml(log.message || '-')}</p>
-                    </div>
-                `).join('')}
-            </div>
-            ${renderPagination('netfilter', data.page, data.pages)}
-        `;
+        // Use shared render function (includes GeoIP info & unban buttons)
+        renderNetfilterData(data);
 
         currentPage.netfilter = page;
     } catch (error) {
@@ -1644,6 +1986,365 @@ async function loadNetfilterLogs(page = 1) {
         document.getElementById('netfilter-logs').innerHTML = `<p class="text-red-500 text-center py-8">Failed to load logs: ${error.message}</p>`;
         const countEl = document.getElementById('security-count');
         if (countEl) countEl.textContent = '';
+    }
+}
+
+// =============================================================================
+// FAIL2BAN SETTINGS
+// =============================================================================
+
+let fail2banSettingsLoaded = false;
+let fail2banActiveBans = null;
+let fail2banRwConfigured = false;
+let fail2banBlacklist = [];
+
+function formatSeconds(seconds) {
+    if (seconds >= 86400) {
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    }
+    if (seconds >= 3600) {
+        const hours = Math.floor(seconds / 3600);
+        const mins = Math.floor((seconds % 3600) / 60);
+        return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    }
+    if (seconds >= 60) {
+        const mins = Math.floor(seconds / 60);
+        return `${mins}m`;
+    }
+    return `${seconds}s`;
+}
+
+async function loadFail2BanSettings() {
+    // Only load once per session (settings don't change often)
+    if (fail2banSettingsLoaded) return;
+
+    const settingsContainer = document.getElementById('fail2ban-settings');
+    const ipListsContainer = document.getElementById('fail2ban-ip-lists');
+    if (!settingsContainer) return;
+
+    try {
+        // Fetch both settings and RW status in parallel
+        const [response, rwResponse] = await Promise.all([
+            authenticatedFetch('/api/fail2ban'),
+            authenticatedFetch('/api/fail2ban/rw-status')
+        ]);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        const rwStatus = rwResponse.ok ? await rwResponse.json() : { rw_configured: false };
+        const canEdit = rwStatus.rw_configured;
+        fail2banSettingsLoaded = true;
+        fail2banRwConfigured = canEdit;
+        fail2banActiveBans = data.active_bans || [];
+
+        // Store blacklist entries globally for button logic
+        const rawBlacklist = data.blacklist || '';
+        fail2banBlacklist = rawBlacklist.replace(/\n/g, ',').split(',').map(e => e.trim()).filter(e => e);
+
+        // Re-render netfilter logs if they were already loaded (race condition fix)
+        // Now after blacklist is loaded, so buttons correctly reflect blacklist state
+        if (lastDataCache.netfilter && canEdit) {
+            renderNetfilterData(lastDataCache.netfilter);
+        }
+
+        // Parse for UI display
+        const whitelistEntries = (data.whitelist || '').split('\n').filter(e => e.trim());
+        const blacklistEntries = fail2banBlacklist;
+        const permBans = data.perm_bans || [];
+
+        // Render settings as editable form or read-only
+        const rwBanner = canEdit ? '' : `
+            <div class="mb-4 px-4 py-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300 text-sm flex items-center gap-2">
+                <span class="text-lg">🔒</span>
+                <span>Editing requires a <strong>Read-Write API key</strong> (<code>MAILCOW_API_KEY_RW</code>). Configure it in Settings → Mailcow → Connection.</span>
+            </div>
+        `;
+
+        settingsContainer.innerHTML = `
+            ${rwBanner}
+            <form id="fail2ban-edit-form">
+                ${canEdit ? `
+                    <div class="mb-3 flex justify-end" id="fail2ban-edit-btn-row">
+                        <button type="button" id="fail2ban-enable-edit-btn"
+                            class="px-3 py-1.5 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg transition-colors flex items-center gap-1.5">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                            Edit Settings
+                        </button>
+                    </div>
+                ` : ''}
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Ban Time (seconds)</label>
+                        <input type="number" name="ban_time" value="${data.ban_time}" min="60"
+                            class="w-full px-2 py-1.5 text-sm font-semibold rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            disabled />
+                        <div class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">${formatSeconds(data.ban_time)}</div>
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Max. Ban Time (seconds)</label>
+                        <input type="number" name="max_ban_time" value="${data.max_ban_time}" min="60"
+                            class="w-full px-2 py-1.5 text-sm font-semibold rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            disabled />
+                        <div class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">${formatSeconds(data.max_ban_time)}</div>
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Ban Time Increment</label>
+                        <div class="mt-1">
+                            <label class="relative inline-flex items-center cursor-pointer opacity-60" id="fail2ban-increment-label">
+                                <input type="checkbox" name="ban_time_increment" ${data.ban_time_increment ? 'checked' : ''} disabled
+                                    class="sr-only peer" />
+                                <div class="w-9 h-5 bg-gray-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                                <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">${data.ban_time_increment ? 'Enabled' : 'Disabled'}</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Max. Attempts</label>
+                        <input type="number" name="max_attempts" value="${data.max_attempts}" min="1"
+                            class="w-full px-2 py-1.5 text-sm font-semibold rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            disabled />
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Retry Window (seconds)</label>
+                        <input type="number" name="retry_window" value="${data.retry_window}" min="1"
+                            class="w-full px-2 py-1.5 text-sm font-semibold rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            disabled />
+                        <div class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">${formatSeconds(data.retry_window)}</div>
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Subnet Ban IPv4</label>
+                        <div class="flex items-center gap-1">
+                            <span class="text-sm text-gray-500 dark:text-gray-400">/</span>
+                            <input type="number" name="netban_ipv4" value="${data.netban_ipv4}" min="8" max="32"
+                                class="w-full px-2 py-1.5 text-sm font-semibold font-mono rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                disabled />
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                        <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1 block">Subnet Ban IPv6</label>
+                        <div class="flex items-center gap-1">
+                            <span class="text-sm text-gray-500 dark:text-gray-400">/</span>
+                            <input type="number" name="netban_ipv6" value="${data.netban_ipv6}" min="8" max="128"
+                                class="w-full px-2 py-1.5 text-sm font-semibold font-mono rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                disabled />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-4 flex justify-end" id="fail2ban-save-row" style="display:none">
+                    <button type="submit" id="fail2ban-save-btn"
+                        class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow transition-colors focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                        Save Settings
+                    </button>
+                </div>
+            </form>
+        `;
+
+        // Render IP lists in separate accordion (editable textareas)
+        if (ipListsContainer) {
+            ipListsContainer.innerHTML = `
+                <form id="fail2ban-ip-form">
+                    ${canEdit ? `
+                        <div class="mb-3 flex justify-end" id="fail2ban-ip-edit-btn-row">
+                            <button type="button" id="fail2ban-ip-enable-edit-btn"
+                                class="px-3 py-1.5 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg transition-colors flex items-center gap-1.5">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                Edit IP Lists
+                            </button>
+                        </div>
+                    ` : ''}
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                            <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2 block">Allowlisted <span class="text-gray-400 dark:text-gray-500">(${whitelistEntries.length})</span></label>
+                            <textarea name="whitelist" rows="4" placeholder="One IP/network per line"
+                                class="w-full px-2 py-1.5 text-sm font-mono rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-green-700 dark:text-green-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
+                                disabled>${escapeHtml((data.whitelist || '').replace(/,/g, '\n'))}</textarea>
+                        </div>
+
+                        <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                            <label class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2 block">Denylisted <span class="text-gray-400 dark:text-gray-500">(${blacklistEntries.length})</span></label>
+                            <textarea name="blacklist" rows="4" placeholder="One IP/network per line"
+                                class="w-full px-2 py-1.5 text-sm font-mono rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-red-700 dark:text-red-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
+                                disabled>${escapeHtml((data.blacklist || '').replace(/,/g, '\n'))}</textarea>
+                        </div>
+
+                        <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                            <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Permanent Bans <span class="text-gray-400 dark:text-gray-500">(${permBans.length})</span></div>
+                            ${permBans.length > 0 ? `
+                                <div class="space-y-1">
+                                    ${permBans.map(ban => `<div class="text-sm font-mono text-red-700 dark:text-red-400">${escapeHtml(ban.network || ban.ip)}</div>`).join('')}
+                                </div>
+                            ` : '<div class="text-sm text-gray-400 dark:text-gray-500">None</div>'}
+                        </div>
+                    </div>
+
+                    <div class="mt-3 px-1 text-xs text-gray-500 dark:text-gray-400 italic">
+                        A denylisted host or network will always outweigh an allowlisted entity. List updates will take a few seconds to be applied.
+                    </div>
+
+                    <div class="mt-3 flex justify-end" id="fail2ban-ip-save-row" style="display:none">
+                        <button type="submit" id="fail2ban-ip-save-btn"
+                            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow transition-colors focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+                            Save IP Lists
+                        </button>
+                    </div>
+                </form>
+            `;
+        }
+
+        // Attach save handlers if edit is enabled
+        if (canEdit) {
+            // Edit Settings button handler
+            const editSettingsBtn = document.getElementById('fail2ban-enable-edit-btn');
+            if (editSettingsBtn) {
+                editSettingsBtn.addEventListener('click', () => {
+                    // Enable all inputs in settings form
+                    const form = document.getElementById('fail2ban-edit-form');
+                    form.querySelectorAll('input').forEach(el => { el.disabled = false; });
+                    // Fix toggle opacity
+                    const incrementLabel = document.getElementById('fail2ban-increment-label');
+                    if (incrementLabel) incrementLabel.classList.remove('opacity-60');
+                    // Hide edit button, show save button
+                    document.getElementById('fail2ban-edit-btn-row').style.display = 'none';
+                    document.getElementById('fail2ban-save-row').style.display = 'flex';
+                });
+            }
+
+            // Edit IP Lists button handler
+            const editIpBtn = document.getElementById('fail2ban-ip-enable-edit-btn');
+            if (editIpBtn) {
+                editIpBtn.addEventListener('click', () => {
+                    const form = document.getElementById('fail2ban-ip-form');
+                    form.querySelectorAll('textarea').forEach(el => { el.disabled = false; });
+                    document.getElementById('fail2ban-ip-edit-btn-row').style.display = 'none';
+                    document.getElementById('fail2ban-ip-save-row').style.display = 'flex';
+                });
+            }
+
+            // Save settings form
+            const settingsForm = document.getElementById('fail2ban-edit-form');
+            if (settingsForm) {
+                settingsForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const btn = document.getElementById('fail2ban-save-btn');
+                    const origText = btn.innerHTML;
+                    btn.disabled = true;
+                    btn.innerHTML = '<div class="loading-sm mr-2"></div> Saving...';
+
+                    try {
+                        // Collect ALL settings values (must send everything)
+                        const ipForm = document.getElementById('fail2ban-ip-form');
+                        const whitelist = ipForm ? ipForm.querySelector('[name="whitelist"]').value.split('\n').filter(l => l.trim()).join(',') : data.whitelist || '';
+                        const blacklist = ipForm ? ipForm.querySelector('[name="blacklist"]').value.split('\n').filter(l => l.trim()).join(',') : data.blacklist || '';
+
+                        const payload = {
+                            attr: {
+                                ban_time: settingsForm.querySelector('[name="ban_time"]').value,
+                                max_ban_time: settingsForm.querySelector('[name="max_ban_time"]').value,
+                                ban_time_increment: settingsForm.querySelector('[name="ban_time_increment"]').checked ? '1' : '0',
+                                max_attempts: settingsForm.querySelector('[name="max_attempts"]').value,
+                                retry_window: settingsForm.querySelector('[name="retry_window"]').value,
+                                netban_ipv4: settingsForm.querySelector('[name="netban_ipv4"]').value,
+                                netban_ipv6: settingsForm.querySelector('[name="netban_ipv6"]').value,
+                                whitelist: whitelist,
+                                blacklist: blacklist
+                            }
+                        };
+
+                        const res = await authenticatedFetch('/api/fail2ban', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        const result = await res.json();
+                        if (res.ok && result.status === 'success') {
+                            showToast('Fail2Ban settings saved successfully', 'success');
+                            // Reset loaded flag so next open fetches fresh data
+                            fail2banSettingsLoaded = false;
+                        } else {
+                            showToast('Failed to save Fail2Ban settings: ' + (result.msg || result.detail || 'Unknown error'), 'error');
+                        }
+                    } catch (err) {
+                        showToast('Failed to save Fail2Ban settings: ' + err.message, 'error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = origText;
+                    }
+                });
+            }
+
+            // Save IP lists form
+            const ipForm = document.getElementById('fail2ban-ip-form');
+            if (ipForm) {
+                ipForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const btn = document.getElementById('fail2ban-ip-save-btn');
+                    const origText = btn.innerHTML;
+                    btn.disabled = true;
+                    btn.innerHTML = '<div class="loading-sm mr-2"></div> Saving...';
+
+                    try {
+                        // Collect ALL values from both forms (must send everything)
+                        const sForm = document.getElementById('fail2ban-edit-form');
+                        const whitelist = ipForm.querySelector('[name="whitelist"]').value.split('\n').filter(l => l.trim()).join(',');
+                        const blacklist = ipForm.querySelector('[name="blacklist"]').value.split('\n').filter(l => l.trim()).join(',');
+
+                        const payload = {
+                            attr: {
+                                ban_time: sForm.querySelector('[name="ban_time"]').value,
+                                max_ban_time: sForm.querySelector('[name="max_ban_time"]').value,
+                                ban_time_increment: sForm.querySelector('[name="ban_time_increment"]').checked ? '1' : '0',
+                                max_attempts: sForm.querySelector('[name="max_attempts"]').value,
+                                retry_window: sForm.querySelector('[name="retry_window"]').value,
+                                netban_ipv4: sForm.querySelector('[name="netban_ipv4"]').value,
+                                netban_ipv6: sForm.querySelector('[name="netban_ipv6"]').value,
+                                whitelist: whitelist,
+                                blacklist: blacklist
+                            }
+                        };
+
+                        const res = await authenticatedFetch('/api/fail2ban', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        const result = await res.json();
+                        if (res.ok && result.status === 'success') {
+                            showToast('Fail2Ban IP lists saved successfully', 'success');
+                            fail2banSettingsLoaded = false;
+                        } else {
+                            showToast('Failed to save Fail2Ban IP lists: ' + (result.msg || result.detail || 'Unknown error'), 'error');
+                        }
+                    } catch (err) {
+                        showToast('Failed to save Fail2Ban IP lists: ' + err.message, 'error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = origText;
+                    }
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Failed to load Fail2Ban settings:', error);
+        settingsContainer.innerHTML = `<p class="text-red-500 text-center py-4">Failed to load Fail2Ban settings: ${error.message}</p>`;
+        if (ipListsContainer) {
+            ipListsContainer.innerHTML = `<p class="text-red-500 text-center py-4">Failed to load IP lists</p>`;
+        }
     }
 }
 
@@ -1721,14 +2422,14 @@ function applyQueueFilters() {
                 <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 bg-gray-50 dark:bg-gray-700/50">
                     <div class="flex flex-col sm:flex-row sm:justify-between sm:items-start mb-2 gap-2">
                         <div class="flex-1">
-                            <p class="text-sm font-medium text-gray-900 dark:text-white">From: ${escapeHtml(item.sender)}</p>
-                            <p class="text-sm text-gray-600 dark:text-gray-300">Queue ID: ${item.queue_id}</p>
+                            <p class="text-sm font-medium text-gray-900 dark:text-white">From: ${copyableText(item.sender)}</p>
+                            <p class="text-sm text-gray-600 dark:text-gray-300">Queue ID: ${copyableText(item.queue_id)}</p>
                         </div>
                         <span class="text-xs text-gray-500 dark:text-gray-400">${formatTime(new Date(item.arrival_time * 1000).toISOString())}</span>
                     </div>
                     <div class="mb-2">
                         <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Recipients:</p>
-                        ${item.recipients.map(r => `<p class="text-sm text-gray-600 dark:text-gray-400">${escapeHtml(r)}</p>`).join('')}
+                        ${item.recipients.map(r => `<p class="text-sm text-gray-600 dark:text-gray-400">${copyableText(r)}</p>`).join('')}
                     </div>
                     <div class="flex items-center justify-between">
                         <span class="text-xs text-gray-500 dark:text-gray-400">Size: ${formatSize(item.message_size)}</span>
@@ -1810,11 +2511,11 @@ function renderQuarantineData(data) {
                     <div class="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-2 mb-2 items-start">
                         <div class="min-w-0 overflow-hidden">
                             <div class="flex flex-wrap items-center gap-2 mb-1">
-                                <span class="text-sm font-medium text-gray-900 dark:text-white">${escapeHtml(item.sender || 'Unknown')}</span>
+                                <span class="text-sm font-medium text-gray-900 dark:text-white">${copyableText(item.sender || 'Unknown')}</span>
                                 <svg class="w-4 h-4 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
                                 </svg>
-                                <span class="text-sm text-gray-600 dark:text-gray-300">${escapeHtml(item.rcpt || 'Unknown')}</span>
+                                <span class="text-sm text-gray-600 dark:text-gray-300">${copyableText(item.rcpt || 'Unknown')}</span>
                             </div>
                             <p class="text-xs text-gray-500 dark:text-gray-400 truncate" title="${escapeHtml(item.subject || 'No subject')}">${escapeHtml(item.subject || 'No subject')}</p>
                         </div>
@@ -1825,7 +2526,7 @@ function renderQuarantineData(data) {
                     </div>
                     <div class="flex flex-wrap items-center gap-4 text-xs text-gray-600 dark:text-gray-400">
                         <span>${formatTime(item.created)}</span>
-                        ${item.qid ? `<span class="font-mono" title="Queue ID">Q: ${item.qid}</span>` : ''}
+                        ${item.qid ? `<span class="font-mono" title="Queue ID">Q: ${copyableText(item.qid)}</span>` : ''}
                         ${item.score !== undefined && item.score !== null ? `<span>Score: <span class="${item.score >= 15 ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-300'}">${item.score.toFixed(1)}</span></span>` : ''}
                     </div>
                 </div>
@@ -1846,7 +2547,10 @@ function applyMessagesFilters() {
         direction: document.getElementById('messages-filter-direction').value,
         user: document.getElementById('messages-filter-user').value,
         status: document.getElementById('messages-filter-status').value,
-        ip: document.getElementById('messages-filter-ip').value
+        ip: document.getElementById('messages-filter-ip').value,
+        date_range: document.getElementById('messages-date-range').value,
+        start_date: document.getElementById('messages-start-date').value,
+        end_date: document.getElementById('messages-end-date').value
     };
     currentPage.messages = 1;
     loadMessages();
@@ -1860,10 +2564,137 @@ function clearMessagesFilters() {
     document.getElementById('messages-filter-user').value = '';
     document.getElementById('messages-filter-status').value = '';
     document.getElementById('messages-filter-ip').value = '';
+    // Reset date range
+    document.getElementById('messages-date-range').value = '';
+    document.getElementById('messages-start-date').value = '';
+    document.getElementById('messages-end-date').value = '';
+    document.getElementById('messages-date-range-start').value = '';
+    document.getElementById('messages-date-range-end').value = '';
+    document.getElementById('messages-date-range-label').textContent = 'All Time';
+    // Reset preset button styles
+    document.querySelectorAll('.messages-date-preset-btn').forEach(btn => {
+        if (btn.getAttribute('data-preset') === '') {
+            btn.className = 'messages-date-preset-btn px-3 py-1.5 text-xs font-medium rounded-md border border-blue-500 bg-blue-500 text-white transition-colors';
+        } else {
+            btn.className = 'messages-date-preset-btn px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors';
+        }
+    });
     currentFilters.messages = {};
     currentPage.messages = 1;
     loadMessages();
 }
+
+// =============================================================================
+// MESSAGES DATE RANGE PICKER
+// =============================================================================
+
+function toggleMessagesDateRangePicker() {
+    const dropdown = document.getElementById('messages-date-range-dropdown');
+    const arrow = document.getElementById('messages-date-range-arrow');
+    const isHidden = dropdown.classList.contains('hidden');
+    dropdown.classList.toggle('hidden');
+    arrow.style.transform = isHidden ? 'rotate(180deg)' : '';
+}
+
+function selectMessagesDatePreset(preset) {
+    const labels = { '': 'All Time', 'today': 'Today', '7days': 'Last 7 Days', '30days': 'Last 30 Days', '90days': 'Last 90 Days' };
+    document.getElementById('messages-date-range-label').textContent = labels[preset] || 'All Time';
+    document.getElementById('messages-date-range').value = preset;
+
+    // Calculate actual dates for the API
+    const now = new Date();
+    let startDate = '';
+    let endDate = now.toISOString();
+
+    if (preset === 'today') {
+        const todayStart = new Date(now);
+        todayStart.setHours(0, 0, 0, 0);
+        startDate = todayStart.toISOString();
+    } else if (preset === '7days') {
+        const d = new Date(now);
+        d.setDate(d.getDate() - 7);
+        startDate = d.toISOString();
+    } else if (preset === '30days') {
+        const d = new Date(now);
+        d.setDate(d.getDate() - 30);
+        startDate = d.toISOString();
+    } else if (preset === '90days') {
+        const d = new Date(now);
+        d.setDate(d.getDate() - 90);
+        startDate = d.toISOString();
+    } else {
+        // All Time
+        startDate = '';
+        endDate = '';
+    }
+
+    document.getElementById('messages-start-date').value = startDate;
+    document.getElementById('messages-end-date').value = endDate;
+
+    // Update preset button styles
+    document.querySelectorAll('.messages-date-preset-btn').forEach(btn => {
+        if (btn.getAttribute('data-preset') === preset) {
+            btn.className = 'messages-date-preset-btn px-3 py-1.5 text-xs font-medium rounded-md border border-blue-500 bg-blue-500 text-white transition-colors';
+        } else {
+            btn.className = 'messages-date-preset-btn px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors';
+        }
+    });
+
+    // Close dropdown and apply
+    document.getElementById('messages-date-range-dropdown').classList.add('hidden');
+    document.getElementById('messages-date-range-arrow').style.transform = '';
+    applyMessagesFilters();
+}
+
+function applyMessagesCustomDateRange() {
+    const startInput = document.getElementById('messages-date-range-start').value;
+    const endInput = document.getElementById('messages-date-range-end').value;
+
+    if (!startInput || !endInput) {
+        showToast('Please select both start and end dates', 'warning');
+        return;
+    }
+
+    const startDate = new Date(startInput);
+    const endDate = new Date(endInput);
+    endDate.setHours(23, 59, 59, 999);
+
+    if (startDate > endDate) {
+        showToast('Start date must be before end date', 'warning');
+        return;
+    }
+
+    document.getElementById('messages-date-range').value = 'custom';
+    document.getElementById('messages-start-date').value = startDate.toISOString();
+    document.getElementById('messages-end-date').value = endDate.toISOString();
+
+    // Format label
+    const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    document.getElementById('messages-date-range-label').textContent = `${fmt(startDate)} - ${fmt(endDate)}`;
+
+    // Reset preset button styles
+    document.querySelectorAll('.messages-date-preset-btn').forEach(btn => {
+        btn.className = 'messages-date-preset-btn px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors';
+    });
+
+    // Close dropdown and apply
+    document.getElementById('messages-date-range-dropdown').classList.add('hidden');
+    document.getElementById('messages-date-range-arrow').style.transform = '';
+    applyMessagesFilters();
+}
+
+// Close messages date range picker on outside click
+document.addEventListener('click', function(e) {
+    const container = document.getElementById('messages-date-range-picker-container');
+    if (container && !container.contains(e.target)) {
+        const dropdown = document.getElementById('messages-date-range-dropdown');
+        const arrow = document.getElementById('messages-date-range-arrow');
+        if (dropdown && !dropdown.classList.contains('hidden')) {
+            dropdown.classList.add('hidden');
+            if (arrow) arrow.style.transform = '';
+        }
+    }
+});
 
 async function loadMessages(page = 1) {
     const container = document.getElementById('messages-logs');
@@ -1884,6 +2715,8 @@ async function loadMessages(page = 1) {
         if (filters.user) params.append('user', filters.user);
         if (filters.status) params.append('status', filters.status);
         if (filters.ip) params.append('ip', filters.ip);
+        if (filters.start_date) params.append('start_date', filters.start_date);
+        if (filters.end_date) params.append('end_date', filters.end_date);
 
         console.log('Loading Messages:', `/api/messages?${params}`);
 
@@ -2767,11 +3600,11 @@ function renderStatusCorrelation(correlation, incompleteList) {
                     ${incompleteList.map(item => `
                         <div class="p-2 bg-white dark:bg-gray-800 rounded text-xs">
                             <div class="flex justify-between items-start mb-1">
-                                <span class="font-mono text-gray-600 dark:text-gray-400">${escapeHtml(item.message_id || 'N/A')}</span>
+                                <span class="font-mono text-gray-600 dark:text-gray-400">${copyableText(item.message_id || 'N/A')}</span>
                                 <span class="text-yellow-600 dark:text-yellow-400">${item.age_minutes}m ago</span>
                             </div>
                             <div class="text-gray-500 dark:text-gray-400">
-                                ${escapeHtml(item.sender || 'N/A')} => ${escapeHtml(item.recipient || 'N/A')}
+                                ${copyableText(item.sender || 'N/A')} => ${copyableText(item.recipient || 'N/A')}
                             </div>
                         </div>
                     `).join('')}
@@ -3072,7 +3905,7 @@ function renderOverviewTab(content, data) {
                                 <svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
                                 </svg>
-                                <span class="text-sm text-gray-900 dark:text-white">${escapeHtml(r)}</span>
+                                <span class="text-sm text-gray-900 dark:text-white">${copyableText(r)}</span>
                             </div>
                         `).join('')}
                     </div>
@@ -3082,7 +3915,7 @@ function renderOverviewTab(content, data) {
             recipientsRightColumn = `
                 <div>
                     <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">To</p>
-                    <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${escapeHtml(recipientsToDisplay[0] || '-')}</p>
+                    <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${copyableText(recipientsToDisplay[0] || '-')}</p>
                 </div>
             `;
         }
@@ -3090,7 +3923,7 @@ function renderOverviewTab(content, data) {
         recipientsRightColumn = `
             <div>
                 <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">To</p>
-                <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${escapeHtml(data.recipient)}</p>
+                <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${copyableText(data.recipient)}</p>
             </div>
         `;
     }
@@ -3105,7 +3938,7 @@ function renderOverviewTab(content, data) {
                         <div class="space-y-3">
                             <div>
                                 <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">From</p>
-                                <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${escapeHtml(data.sender || '-')}</p>
+                                <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${copyableText(data.sender || '-')}</p>
                             </div>
                             ${data.subject && data.subject !== 'Postfix Log Details' ? `
                                 <div class="min-w-0">
@@ -3129,13 +3962,13 @@ function renderOverviewTab(content, data) {
                             ${data.queue_id ? `
                                 <div>
                                     <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Queue ID</p>
-                                    <p class="text-xs font-mono text-gray-600 dark:text-gray-400 mt-1">${data.queue_id}</p>
+                                    <p class="text-xs font-mono text-gray-600 dark:text-gray-400 mt-1">${copyableText(data.queue_id)}</p>
                                 </div>
                             ` : ''}
                             ${data.message_id ? `
                                 <div>
                                     <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Message ID</p>
-                                    <p class="text-xs font-mono text-gray-600 dark:text-gray-400 mt-1 break-all">${escapeHtml(data.message_id)}</p>
+                                    <p class="text-xs font-mono text-gray-600 dark:text-gray-400 mt-1 break-all">${copyableText(data.message_id)}</p>
                                 </div>
                             ` : ''}
                         </div>
@@ -3193,7 +4026,7 @@ function renderOverviewTab(content, data) {
                                 <p class="text-sm font-medium text-blue-900 dark:text-blue-300 mb-2">Additional Details</p>
                                 <div class="space-y-1 text-xs text-blue-800 dark:text-blue-400">
                                     ${data.rspamd.ip ? renderGeoIPInfo(data.rspamd, '16x12') : ''}
-                                    ${data.rspamd.user ? `<p>Authenticated User: ${escapeHtml(data.rspamd.user)}</p>` : ''}
+                                    ${data.rspamd.user ? `<p>Authenticated User: ${copyableText(data.rspamd.user)}</p>` : ''}
                                     ${data.rspamd.size ? `<p>Message Size: ${formatSize(data.rspamd.size)}</p>` : ''}
                                     ${data.rspamd.has_auth ? `<p>Authentication: Verified (MAILCOW_AUTH)</p>` : ''}
                                 </div>
@@ -3304,30 +4137,30 @@ function renderPostfixTab(content, data) {
                     ${sender ? `
                         <div>
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">From</p>
-                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${escapeHtml(sender)}</p>
+                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${copyableText(sender)}</p>
                         </div>
                     ` : ''}
                     ${recipientsFromPostfix.size > 0 ? `
                         <div>
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">To (${recipientsFromPostfix.size})</p>
-                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${recipientsFromPostfix.size === 1 ? escapeHtml(Array.from(recipientsFromPostfix)[0]) : `${recipientsFromPostfix.size} recipients`}</p>
+                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${recipientsFromPostfix.size === 1 ? copyableText(Array.from(recipientsFromPostfix)[0]) : `${recipientsFromPostfix.size} recipients`}</p>
                         </div>
                     ` : (data.recipients && data.recipients.length > 0 ? `
                         <div>
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">To (${data.recipients.length})</p>
-                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${data.recipients.length === 1 ? escapeHtml(data.recipients[0]) : `${data.recipients.length} recipients`}</p>
+                            <p class="text-sm font-semibold text-gray-900 dark:text-white mt-1">${data.recipients.length === 1 ? copyableText(data.recipients[0]) : `${data.recipients.length} recipients`}</p>
                         </div>
                     ` : '')}
                     ${clientIp ? `
                         <div>
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Client IP</p>
-                            <p class="text-sm font-mono font-semibold text-gray-900 dark:text-white mt-1">${clientIp}</p>
+                            <p class="text-sm font-mono font-semibold text-gray-900 dark:text-white mt-1">${copyableText(clientIp)}</p>
                         </div>
                     ` : ''}
                     ${queueId ? `
                         <div>
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Queue ID</p>
-                            <p class="text-sm font-mono font-semibold text-gray-900 dark:text-white mt-1">${queueId}</p>
+                            <p class="text-sm font-mono font-semibold text-gray-900 dark:text-white mt-1">${copyableText(queueId)}</p>
                         </div>
                     ` : ''}
                     ${finalStatus ? `
@@ -3345,7 +4178,7 @@ function renderPostfixTab(content, data) {
                     ${messageId ? `
                         <div class="md:col-span-2">
                             <p class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Message ID</p>
-                            <p class="text-xs font-mono text-gray-700 dark:text-gray-300 mt-1 break-all">${escapeHtml(messageId)}</p>
+                            <p class="text-xs font-mono text-gray-700 dark:text-gray-300 mt-1 break-all">${copyableText(messageId)}</p>
                         </div>
                     ` : ''}
                 </div>
@@ -3361,7 +4194,7 @@ function renderPostfixTab(content, data) {
         return `
                                 <div class="p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg border border-gray-200 dark:border-gray-600">
                                     <div class="flex items-center justify-between">
-                                        <span class="text-sm text-gray-900 dark:text-white truncate flex-1">${escapeHtml(recipient)}</span>
+                                        <span class="text-sm text-gray-900 dark:text-white truncate flex-1">${copyableText(recipient)}</span>
                                         ${statusLog.status ? `<span class="ml-2 inline-block px-2 py-0.5 text-xs font-medium rounded ${getStatusClass(statusLog.status)}">${statusLog.status}</span>` : ''}
                                     </div>
                                     ${statusLog.relay ? `<p class="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">via ${escapeHtml(statusLog.relay)}</p>` : ''}
@@ -3523,11 +4356,11 @@ function renderNetfilterTab(content, data) {
                         <div class="flex justify-between items-start mb-2">
                             <div class="flex items-center gap-2">
                                 <span class="text-xs font-mono text-gray-600 dark:text-gray-300">${formatTime(log.time)}</span>
-                                <span class="text-xs font-mono font-semibold text-gray-900 dark:text-white">${log.ip}</span>
+                                <span class="text-xs font-mono font-semibold text-gray-900 dark:text-white">${copyableText(log.ip)}</span>
                             </div>
                             <span class="inline-block px-2 py-0.5 text-xs font-medium rounded ${getActionClass(log.action)}">${getActionLabel(log.action)}</span>
                         </div>
-                        ${log.username ? `<p class="text-xs text-gray-700 dark:text-gray-300">User: ${escapeHtml(log.username)}</p>` : ''}
+                        ${log.username ? `<p class="text-xs text-gray-700 dark:text-gray-300">User: ${copyableText(log.username)}</p>` : ''}
                         ${log.auth_method ? `<p class="text-xs text-gray-600 dark:text-gray-400">Method: ${log.auth_method}</p>` : ''}
                         ${log.attempts_left !== null ? `<p class="text-xs text-gray-600 dark:text-gray-400">Attempts remaining: ${log.attempts_left}</p>` : ''}
                         <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 font-mono">${escapeHtml(log.message)}</p>
@@ -3618,14 +4451,14 @@ function renderGeoIPInfo(rspamdData, size = '24x18') {
     const hasGeoIP = rspamdData.country_code;
 
     if (!hasGeoIP) {
-        return `<p>Source IP: ${escapeHtml(ip)}</p>`;
+        return `<p>Source IP: ${copyableText(ip)}</p>`;
     }
 
     const flagUrl = getFlagUrl(rspamdData.country_code, size);
     const [width, height] = size.split('x').map(Number);
 
     // Use a list to store the parts of the info string
-    let parts = [`<strong>${escapeHtml(ip)}</strong>`];
+    let parts = [`<strong>${copyableText(ip)}</strong>`];
 
     if (rspamdData.country_name && flagUrl) {
         // Wrap image and country name in a span to keep them together and aligned
@@ -3813,6 +4646,44 @@ function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+// =============================================================================
+// CLICK-TO-COPY
+// =============================================================================
+
+function copyToClipboard(text, event) {
+    if (event) {
+        event.stopPropagation();
+        event.preventDefault();
+    }
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('Copied: ' + text, 'success');
+        // Brief visual feedback on the icon
+        if (event && event.currentTarget) {
+            const icon = event.currentTarget.querySelector('.copy-icon');
+            if (icon) {
+                icon.classList.add('copied');
+                icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
+                setTimeout(() => {
+                    icon.classList.remove('copied');
+                    icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>';
+                }, 1500);
+            }
+        }
+    }).catch(err => {
+        console.error('Copy failed:', err);
+        showToast('Failed to copy', 'error');
+    });
+}
+
+function copyableText(text, extraClasses) {
+    if (!text || text === '-') return escapeHtml(text || '-');
+    const cls = extraClasses ? ' ' + extraClasses : '';
+    const escaped = escapeHtml(text);
+    // Use double-escaped quotes for the onclick attribute
+    const safeText = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `<span class="copyable${cls}" onclick="copyToClipboard('${safeText}', event)" title="Click to copy">${escaped}<svg class="copy-icon w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg></span>`;
 }
 
 function getStatusClass(status) {
@@ -4699,7 +5570,8 @@ function formatBytes(bytes) {
 // Per-field descriptions (from env.example comments)
 var SETTINGS_FIELD_DESCRIPTIONS = {
     mailcow_url: 'Your mailcow instance URL (without trailing slash).',
-    mailcow_api_key: 'mailcow API key. Generate from System → API in mailcow admin. Required permissions: Read access to logs.',
+    mailcow_api_key: 'mailcow API key (Read-Only). Generate from System → API in mailcow admin. Required permissions: Read access to logs.',
+    mailcow_api_key_rw: 'mailcow API key (Read-Write). Optional. Generate a separate key from System → API with write permissions. Used only for edit operations (e.g. Fail2Ban settings).',
     mailcow_api_timeout: 'API request timeout in seconds.',
     mailcow_api_verify_ssl: 'Verify SSL certificates when connecting to mailcow API. Set to false for development with self-signed certificates. Default: true.',
     fetch_interval: 'Seconds between log fetches from mailcow. Lower = more frequent updates, higher load. Default: 60.',
@@ -4772,7 +5644,7 @@ var SETTINGS_FIELD_DESCRIPTIONS = {
 var SETTINGS_EDIT_TABS = [
     {
         id: 'mailcow', label: 'Mailcow', description: 'Your mailcow instance URL and API credentials. API key needs read access to logs (generate from System → API in mailcow admin). Set verify SSL to false only for development with self-signed certificates.', groups: [
-            { label: 'Connection', keys: ['mailcow_url', 'mailcow_api_key'] },
+            { label: 'Connection', keys: ['mailcow_url', 'mailcow_api_key', 'mailcow_api_key_rw'] },
             { label: 'Advanced', keys: ['mailcow_api_timeout', 'mailcow_api_verify_ssl'] }
         ]
     },
@@ -4851,7 +5723,7 @@ var SETTINGS_EDIT_TABS = [
     }
 ];
 
-function renderSettingsEditField(key, value, sensitiveKeys, description, envLocked) {
+function renderSettingsEditField(key, value, sensitiveKeys, description, envLocked, defaultValue) {
     const isBool = typeof value === 'boolean';
     const isNum = typeof value === 'number';
     const sensitive = sensitiveKeys.includes(key);
@@ -4869,18 +5741,68 @@ function renderSettingsEditField(key, value, sensitiveKeys, description, envLock
     const disabledAttr = envLocked ? 'disabled' : '';
     const envLockedHtml = envLocked ? '<p class="text-xs text-blue-600 dark:text-blue-400 mt-1 flex items-center gap-1"><svg class="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"></path></svg>Controlled by ENV variable - cannot be changed from here.</p>' : '';
     const labelLockIcon = envLocked ? ' <svg class="w-3.5 h-3.5 inline-block text-blue-500 dark:text-blue-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"></path></svg>' : '';
+
+    // Determine if changed from default
+    const hasDefault = defaultValue !== null && defaultValue !== undefined;
+    // User-specific settings: show plain "Clear" instead of "Reset to default" since
+    // these are inherently unique per deployment (credentials, feature toggles, connection details)
+    const USER_SPECIFIC_KEYS = new Set([
+        'mailcow_url', 'mailcow_api_key', 'mailcow_api_key_rw',
+        'basic_auth_enabled', 'auth_username', 'auth_password',
+        'oauth2_enabled', 'oauth2_provider_name', 'oauth2_issuer_url', 'oauth2_use_oidc_discovery',
+        'oauth2_authorization_url', 'oauth2_token_url', 'oauth2_userinfo_url',
+        'oauth2_client_id', 'oauth2_client_secret', 'oauth2_redirect_uri', 'oauth2_scopes',
+        'session_secret_key',
+        'smtp_enabled', 'smtp_host', 'smtp_port', 'smtp_user', 'smtp_password', 'smtp_from',
+        'admin_email', 'blacklist_alert_email', 'dmarc_error_email',
+        'dmarc_imap_enabled', 'dmarc_imap_host', 'dmarc_imap_port',
+        'dmarc_imap_user', 'dmarc_imap_password', 'dmarc_imap_folder',
+        'maxmind_account_id', 'maxmind_license_key',
+        'app_title', 'app_logo_url', 'blacklist_emails', 'local_domains',
+        'enable_weekly_summary'
+    ]);
+    const isUserSpecific = USER_SPECIFIC_KEYS.has(key);
+    const isChanged = hasDefault && !sensitive && !isUserSpecific && (function() {
+        if (isBool) return value !== defaultValue;
+        if (isNum) return Number(value) !== Number(defaultValue);
+        return String(value || '') !== String(defaultValue || '');
+    })();
+    // For sensitive keys with a value set (masked), consider them "changed" from empty default
+    const isSensitiveChanged = sensitive && hasDefault && displayVal === '********';
+
+    // Clear/Reset button HTML (not shown for env-locked fields)
+    let clearBtnHtml = '';
+    if (!envLocked) {
+        if (hasDefault && !isUserSpecific && (isChanged || isSensitiveChanged)) {
+            const defaultLabel = sensitive ? '(empty)' : escapeHtml(String(defaultValue));
+            clearBtnHtml = '<button type="button" class="settings-clear-btn text-xs text-amber-600 dark:text-amber-400 hover:text-amber-800 dark:hover:text-amber-200 mt-1 flex items-center gap-1 transition-colors" data-key="' + key + '" data-default="' + escapeHtml(String(defaultValue)) + '" data-sensitive="' + sensitive + '" data-isbool="' + isBool + '">' +
+                '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>' +
+                'Reset to default' + (isBool ? ': ' + defaultLabel : ' (' + defaultLabel + ')') + '</button>';
+        } else if (!isBool && String(displayVal).trim() !== '' && !(sensitive && displayVal === '') && !(hasDefault && !isUserSpecific && String(displayVal) === String(defaultValue))) {
+            clearBtnHtml = '<button type="button" class="settings-clear-btn text-xs text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 mt-1 flex items-center gap-1 transition-colors" data-key="' + key + '" data-default="' + (hasDefault ? escapeHtml(String(defaultValue)) : '') + '" data-sensitive="' + sensitive + '" data-isbool="false">' +
+                '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>' +
+                'Clear</button>';
+        }
+    }
+
+    // Changed border style
+    const changedBorder = (isChanged || isSensitiveChanged) && !envLocked ? 'border-amber-400 dark:border-amber-500 ring-1 ring-amber-200 dark:ring-amber-800' : '';
+
     if (isBool) {
-        return '<div class="flex items-center gap-2 p-2 ' + (envLocked ? 'bg-gray-100 dark:bg-gray-800/50 opacity-60' : 'bg-gray-50 dark:bg-gray-700/30') + ' rounded">' +
+        return '<div class="flex items-center justify-between gap-2 p-2 ' + (envLocked ? 'bg-gray-100 dark:bg-gray-800/50 opacity-60' : (isChanged ? 'bg-amber-50 dark:bg-amber-900/10 border border-amber-300 dark:border-amber-700 rounded' : 'bg-gray-50 dark:bg-gray-700/30')) + ' rounded">' +
+            '<div class="flex items-center gap-2">' +
             '<input type="checkbox" id="edit-' + key + '" name="' + key + '" ' + (displayVal ? 'checked' : '') + ' ' + disabledAttr + ' class="rounded border-gray-300 dark:border-gray-600">' +
-            '<div><label for="edit-' + key + '" class="text-sm font-medium text-gray-700 dark:text-gray-300">' + escapeHtml(label) + labelLockIcon + '</label>' + descHtml + envLockedHtml + '</div></div>';
+            '<div><label for="edit-' + key + '" class="text-sm font-medium text-gray-700 dark:text-gray-300">' + escapeHtml(label) + labelLockIcon + '</label>' + descHtml + envLockedHtml + '</div></div>' +
+            clearBtnHtml + '</div>';
     }
     const inputType = sensitive ? 'password' : (isNum ? 'number' : 'text');
-    const placeholder = envLocked ? 'Controlled by ENV' : (sensitive ? 'Leave empty to keep current' : '');
+    const placeholder = envLocked ? 'Controlled by ENV' : '';
     const valAttr = (isBool ? '' : displayVal);
     return '<div class="' + (envLocked ? 'opacity-60' : '') + '"><label for="edit-' + key + '" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">' + escapeHtml(label) + labelLockIcon + '</label>' +
         descHtml +
         '<input type="' + inputType + '" id="edit-' + key + '" name="' + key + '" value="' + escapeHtml(valAttr) + '" placeholder="' + escapeHtml(placeholder) + '" ' + disabledAttr + ' ' +
-        'class="w-full rounded border ' + (envLocked ? 'border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed' : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white') + ' px-3 py-2 text-sm">' +
+        'class="w-full rounded border ' + (envLocked ? 'border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed' : (changedBorder ? changedBorder + ' bg-white dark:bg-gray-700 text-gray-900 dark:text-white' : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white')) + ' px-3 py-2 text-sm">' +
+        clearBtnHtml +
         envLockedHtml + '</div>';
 }
 
@@ -4913,6 +5835,7 @@ async function loadSettings() {
                 const editableData = await editableRes.json();
                 if (data.settings_edit_via_ui_enabled === undefined) data.settings_edit_via_ui_enabled = editableData.settings_edit_via_ui_enabled;
                 if (data.settings_edit_via_ui_enabled && !data.editable_config) data.editable_config = editableData.configuration || {};
+                if (editableData.default_config) data.default_config = editableData.default_config;
                 if (editableData.settings_migrated !== undefined) data.settings_migrated = editableData.settings_migrated;
                 if (editableData.env_locked_keys) data.env_locked_keys = editableData.env_locked_keys;
             }
@@ -5324,8 +6247,9 @@ function renderSettings(content, data) {
         </div>
 
         ${data.settings_edit_via_ui_enabled && data.editable_config ? (function () {
-            const sensitiveKeys = ['mailcow_api_key', 'auth_password', 'oauth2_client_secret', 'smtp_password', 'dmarc_imap_password', 'session_secret_key', 'maxmind_license_key'];
+            const sensitiveKeys = ['mailcow_api_key', 'mailcow_api_key_rw', 'auth_password', 'oauth2_client_secret', 'smtp_password', 'dmarc_imap_password', 'session_secret_key', 'maxmind_license_key'];
             const envLockedKeys = new Set(data.env_locked_keys || []);
+            const defaults = data.default_config || {};
             const allAssignedKeys = new Set(SETTINGS_EDIT_TABS.flatMap(function (t) { return (t.groups || []).flatMap(function (g) { return g.keys; }); }));
             const configKeys = Object.keys(data.editable_config);
             const otherKeys = configKeys.filter(function (k) { return !allAssignedKeys.has(k); });
@@ -5387,7 +6311,7 @@ function renderSettings(content, data) {
                     if (groupKeys.length === 0) return;
                     tabsHtml += '<div class="mb-6"><h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">' + escapeHtml(group.label) + '</h4><div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
                     groupKeys.forEach(function (key) {
-                        tabsHtml += renderSettingsEditField(key, data.editable_config[key], sensitiveKeys, SETTINGS_FIELD_DESCRIPTIONS[key] || '', envLockedKeys.has(key));
+                        tabsHtml += renderSettingsEditField(key, data.editable_config[key], sensitiveKeys, SETTINGS_FIELD_DESCRIPTIONS[key] || '', envLockedKeys.has(key), defaults[key]);
                     });
                     tabsHtml += '</div></div>';
                 });
@@ -5682,13 +6606,44 @@ function renderSettings(content, data) {
                 if (panel) panel.classList.remove('hidden');
             });
         });
+
+        // Clear/Reset button handlers
+        content.querySelectorAll('.settings-clear-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                const key = btn.getAttribute('data-key');
+                const defaultVal = btn.getAttribute('data-default');
+                const isSensitive = btn.getAttribute('data-sensitive') === 'true';
+                const isBool = btn.getAttribute('data-isbool') === 'true';
+                const el = content.querySelector('[name="' + key + '"]');
+                if (!el) return;
+                if (isBool) {
+                    el.checked = defaultVal === 'true';
+                } else if (isSensitive) {
+                    el.value = '';
+                    el.type = 'text'; // Show cleared field
+                } else {
+                    el.value = defaultVal || '';
+                }
+                // Remove the amber border from parent
+                const parent = el.closest('div');
+                if (parent) {
+                    parent.classList.remove('border-amber-400', 'dark:border-amber-500', 'ring-1', 'ring-amber-200', 'dark:ring-amber-800');
+                    parent.classList.remove('bg-amber-50', 'dark:bg-amber-900/10', 'border-amber-300', 'dark:border-amber-700');
+                }
+                // Also remove ring from input itself
+                el.classList.remove('border-amber-400', 'dark:border-amber-500', 'ring-1', 'ring-amber-200', 'dark:ring-amber-800');
+                // Remove the clear button itself
+                btn.remove();
+            });
+        });
+
         const form = content.querySelector('#settings-edit-form');
         const importBtn = content.querySelector('#settings-import-env-btn');
         if (form) {
             form.onsubmit = async (e) => {
                 e.preventDefault();
                 const payload = {};
-                const sensitiveKeys = ['mailcow_api_key', 'auth_password', 'oauth2_client_secret', 'smtp_password', 'dmarc_imap_password', 'session_secret_key', 'maxmind_license_key'];
+                const sensitiveKeys = ['mailcow_api_key', 'mailcow_api_key_rw', 'auth_password', 'oauth2_client_secret', 'smtp_password', 'dmarc_imap_password', 'session_secret_key', 'maxmind_license_key'];
                 for (const key of Object.keys(data.editable_config)) {
                     const el = form.querySelector('[name="' + key + '"]');
                     if (!el) continue;
@@ -5696,9 +6651,10 @@ function renderSettings(content, data) {
                         payload[key] = el.checked;
                     } else {
                         const val = el.value;
-                        if (sensitiveKeys.includes(key) && (val === '' || val === '********')) continue;
+                        // For sensitive keys: skip only if still masked (unchanged), send empty string if cleared
+                        if (sensitiveKeys.includes(key) && val === '********') continue;
                         if (typeof data.editable_config[key] === 'number') payload[key] = val === '' ? 0 : Number(val);
-                        else payload[key] = val === '' ? null : val;
+                        else payload[key] = val === '' ? '' : val;
                     }
                 }
                 try {

@@ -17,6 +17,16 @@ const VALID_ROUTES = [
     'settings'
 ];
 
+// URL aliases: URL path -> internal route name
+const ROUTE_ALIASES = {
+    'security': 'netfilter'
+};
+
+// Reverse aliases: internal route -> URL path
+const ROUTE_DISPLAY = {
+    'netfilter': 'security'
+};
+
 /**
  * Parse the current URL path into route components
  * @returns {Object} Route info with baseRoute and optional params
@@ -36,7 +46,8 @@ function parseRoute() {
         return { baseRoute: 'dashboard', params: {} };
     }
 
-    const baseRoute = segments[0];
+    // Resolve URL aliases (e.g., /security -> netfilter)
+    const baseRoute = ROUTE_ALIASES[segments[0]] || segments[0];
 
     // Special handling for DMARC nested routes
     if (baseRoute === 'dmarc' && segments.length > 1) {
@@ -91,7 +102,9 @@ function buildPath(baseRoute, params = {}) {
         return '/';
     }
 
-    let path = `/${baseRoute}`;
+    // Use display name for URL (e.g., netfilter -> /security)
+    const urlSegment = ROUTE_DISPLAY[baseRoute] || baseRoute;
+    let path = `/${urlSegment}`;
 
     // Handle DMARC nested routes
     if (baseRoute === 'dmarc' && params.domain) {

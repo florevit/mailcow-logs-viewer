@@ -2,7 +2,7 @@
 API endpoints for log retrieval and search
 """
 import logging
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, and_, desc, func
 from datetime import datetime, timedelta, timezone
@@ -12,6 +12,7 @@ from ..database import get_db
 from ..models import PostfixLog, RspamdLog, NetfilterLog, MessageCorrelation
 from ..mailcow_api import mailcow_api
 from ..config import settings
+from ..services import geoip_service
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +341,118 @@ async def get_rspamd_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/logs/netfilter/countries")
+async def get_netfilter_countries(db: Session = Depends(get_db)):
+    """
+    Get distinct country codes from netfilter logs for the filter dropdown
+    """
+    try:
+        rows = db.query(
+            NetfilterLog.country_code,
+            NetfilterLog.country_name
+        ).filter(
+            NetfilterLog.country_code.isnot(None)
+        ).distinct().order_by(NetfilterLog.country_name).all()
+        
+        return [{"code": r.country_code, "name": r.country_name} for r in rows if r.country_code]
+    except Exception as e:
+        logger.error(f"Error fetching netfilter countries: {e}")
+        return []
+
+
+@router.get("/logs/netfilter/stats/by-country")
+async def get_netfilter_stats_by_country(
+    days: int = Query(30, ge=1, le=365, description="Number of days to look back"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get netfilter event counts grouped by country and action type.
+    Returns data suitable for a stacked bar chart.
+    """
+    try:
+        import re
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        
+        # Fetch ALL netfilter events in the time range (including those without country_code)
+        rows = db.query(
+            NetfilterLog.country_code,
+            NetfilterLog.country_name,
+            NetfilterLog.action,
+            NetfilterLog.message,
+            NetfilterLog.ip
+        ).filter(
+            NetfilterLog.time >= cutoff
+        ).all()
+
+        # Aggregate into per-country structure
+        countries = {}
+        for row in rows:
+            code = row.country_code
+            name = row.country_name
+            
+            # If no country_code, try to resolve from IP (or extract IP from message)
+            if not code:
+                ip = row.ip
+                if not ip and row.message:
+                    # Extract IP from message text
+                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', row.message)
+                    if ip_match:
+                        ip = ip_match.group(1)
+                
+                if ip and geoip_service.is_geoip_available():
+                    geo = geoip_service.lookup_ip(ip)
+                    code = geo.get('country_code')
+                    name = geo.get('country_name')
+            
+            if not code:
+                continue  # Skip events we can't geo-locate
+            
+            if code not in countries:
+                countries[code] = {
+                    "country_code": code,
+                    "country_name": name or code,
+                    "ban": 0,
+                    "unban": 0,
+                    "warning": 0,
+                    "total": 0
+                }
+            
+            action = (row.action or '').lower()
+            msg_lower = (row.message or '').lower()
+            
+            # Re-classify 'info' events by examining the message text
+            if action == 'info' and msg_lower:
+                if 'removed' in msg_lower and 'denylist' in msg_lower:
+                    action = 'unban'
+                elif 'added' in msg_lower and 'denylist' in msg_lower:
+                    action = 'ban'
+
+            if action in ('ban', 'banned'):
+                countries[code]["ban"] += 1
+            elif action == 'unban':
+                countries[code]["unban"] += 1
+            elif action == 'warning':
+                countries[code]["warning"] += 1
+            # Skip 'info' and 'other' — not interesting for chart
+            else:
+                continue
+            countries[code]["total"] += 1
+
+        # Remove countries with 0 total after filtering
+        countries = {k: v for k, v in countries.items() if v["total"] > 0}
+
+        # Sort by total descending, take top 10
+        sorted_countries = sorted(countries.values(), key=lambda x: x["total"], reverse=True)[:10]
+        
+        return {
+            "days": days,
+            "data": sorted_countries
+        }
+    except Exception as e:
+        logger.error(f"Error fetching netfilter stats by country: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/logs/netfilter")
 async def get_netfilter_logs(
     page: int = Query(1, ge=1),
@@ -348,6 +461,7 @@ async def get_netfilter_logs(
     ip: Optional[str] = Query(None),
     username: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
+    country_code: Optional[str] = Query(None, description="Filter by country code (e.g., US, IL)"),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
     db: Session = Depends(get_db)
@@ -387,6 +501,9 @@ async def get_netfilter_logs(
             else:
                 query = query.filter(NetfilterLog.action == action)
         
+        if country_code:
+            query = query.filter(NetfilterLog.country_code == country_code.upper())
+        
         if start_date:
             query = query.filter(NetfilterLog.time >= start_date)
         
@@ -416,7 +533,12 @@ async def get_netfilter_logs(
                     "attempts_left": log.attempts_left,
                     "username": log.username,
                     "auth_method": log.auth_method,
-                    "action": log.action
+                    "action": log.action,
+                    "country_code": log.country_code,
+                    "country_name": log.country_name,
+                    "city": log.city,
+                    "asn": log.asn,
+                    "asn_org": log.asn_org
                 }
                 for log in logs
             ]
@@ -424,6 +546,175 @@ async def get_netfilter_logs(
     except Exception as e:
         logger.error(f"Error fetching Netfilter logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/fail2ban")
+async def get_fail2ban():
+    """
+    Get Fail2Ban configuration from mailcow (real-time)
+    """
+    try:
+        data = await mailcow_api.get_fail2ban()
+        
+        if data is None:
+            raise HTTPException(status_code=503, detail="Could not fetch Fail2Ban configuration from mailcow")
+        
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching Fail2Ban configuration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/fail2ban/rw-status")
+async def get_fail2ban_rw_status():
+    """
+    Check if the Read-Write API key is configured (needed for edit operations)
+    """
+    return {"rw_configured": mailcow_api.has_rw_key}
+
+
+@router.post("/fail2ban")
+async def edit_fail2ban(request: Request):
+    """
+    Update Fail2Ban configuration on mailcow (requires Read-Write API key)
+    """
+    try:
+        body = await request.json()
+        attrs = body.get("attr", body)
+        
+        result = await mailcow_api.edit_fail2ban(attrs)
+        
+        # mailcow returns a list with status objects
+        if isinstance(result, list) and len(result) > 0:
+            first = result[0]
+            if first.get("type") == "success":
+                return {"status": "success", "msg": first.get("msg", "Settings updated")}
+            else:
+                return {"status": "error", "msg": first.get("msg", "Update failed")}
+        
+        return {"status": "success", "msg": "Settings updated", "raw": result}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating Fail2Ban configuration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/fail2ban/unban")
+async def unban_fail2ban(request: Request):
+    """
+    Unban an IP address from Fail2Ban on mailcow (requires Read-Write API key)
+    """
+    try:
+        body = await request.json()
+        ip = body.get("ip")
+        if not ip:
+            raise HTTPException(status_code=400, detail="Missing 'ip' field")
+        
+        result = await mailcow_api.unban_fail2ban(ip)
+        
+        # mailcow returns a list with status objects
+        if isinstance(result, list) and len(result) > 0:
+            first = result[0]
+            if first.get("type") == "success":
+                return {"status": "success", "msg": first.get("msg", f"IP {ip} unbanned")}
+            else:
+                return {"status": "error", "msg": first.get("msg", "Unban failed")}
+        
+        return {"status": "success", "msg": f"IP {ip} unbanned", "raw": result}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error unbanning IP from Fail2Ban: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/fail2ban/ban")
+async def ban_fail2ban(request: Request):
+    """
+    Ban an IP address in Fail2Ban on mailcow by adding it to the blacklist.
+    Fetches current settings, appends IP to blacklist, and saves back.
+    Requires Read-Write API key.
+    """
+    try:
+        body = await request.json()
+        ip = body.get("ip")
+        if not ip:
+            raise HTTPException(status_code=400, detail="Missing 'ip' field")
+        
+        # Get current fail2ban settings to read the existing blacklist
+        current = await mailcow_api.get_fail2ban()
+        if current is None:
+            raise HTTPException(status_code=503, detail="Could not fetch current Fail2Ban settings")
+        
+        # Parse current blacklist (may be comma or newline separated from GET API)
+        current_blacklist = current.get("blacklist", "")
+        # Normalize: split by both commas and newlines
+        blacklist_entries = [e.strip() for e in current_blacklist.replace('\n', ',').split(",") if e.strip()] if current_blacklist else []
+        
+        # Check if IP is already in the blacklist
+        if ip in blacklist_entries:
+            return {"status": "success", "msg": f"IP {ip} is already in the blacklist"}
+        
+        # Add IP to blacklist
+        blacklist_entries.append(ip)
+        new_blacklist = ",".join(blacklist_entries)
+        
+        # Normalize whitelist the same way
+        current_whitelist = current.get("whitelist", "")
+        whitelist_normalized = ",".join([e.strip() for e in current_whitelist.replace('\n', ',').split(",") if e.strip()]) if current_whitelist else ""
+        
+        # Build full attribute set (required by mailcow API - ALL params must be sent)
+        # ban_time_increment must be "1" or "0" as string
+        bti = current.get("ban_time_increment", 1)
+        bti_str = "1" if bti in (True, 1, "1") else "0"
+        
+        attrs = {
+            "ban_time": str(current.get("ban_time", "86400")),
+            "ban_time_increment": bti_str,
+            "blacklist": new_blacklist,
+            "max_attempts": str(current.get("max_attempts", "5")),
+            "max_ban_time": str(current.get("max_ban_time", "86400")),
+            "netban_ipv4": str(current.get("netban_ipv4", "24")),
+            "netban_ipv6": str(current.get("netban_ipv6", "64")),
+            "retry_window": str(current.get("retry_window", "600")),
+            "whitelist": whitelist_normalized
+        }
+        
+        logger.info(f"Banning IP {ip} - sending attrs: {attrs}")
+        result = await mailcow_api.edit_fail2ban(attrs)
+        
+        if isinstance(result, list) and len(result) > 0:
+            first = result[0]
+            if first.get("type") == "success":
+                return {"status": "success", "msg": f"IP {ip} added to blacklist"}
+            else:
+                return {"status": "error", "msg": first.get("msg", "Ban failed")}
+        
+        return {"status": "success", "msg": f"IP {ip} added to blacklist", "raw": result}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error banning IP in Fail2Ban: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/geoip/{ip}")
+async def lookup_geoip(ip: str):
+    """
+    Lookup GeoIP information for an IP address.
+    Returns country, city, ASN info when MaxMind databases are available.
+    """
+    if not geoip_service.is_geoip_available():
+        return {"available": False}
+    
+    geo = geoip_service.lookup_ip(ip)
+    return {"available": True, "ip": ip, **geo}
 
 
 @router.get("/queue")

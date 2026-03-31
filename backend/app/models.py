@@ -121,6 +121,13 @@ class NetfilterLog(Base):
     auth_method = Column(String(50))
     action = Column(String(50), index=True)
     
+    # GeoIP data (enriched at import time when MaxMind databases are available)
+    country_code = Column(String(2), index=True)
+    country_name = Column(String(100))
+    city = Column(String(100))
+    asn = Column(String(20))
+    asn_org = Column(String(255))
+    
     raw_data = Column(JSONB)
     
     created_at = Column(DateTime, default=datetime.utcnow)

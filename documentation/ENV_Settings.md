@@ -13,7 +13,7 @@ These settings **must** be configured in your `.env` file:
 | Variable | Type | Description | Example |
 |----------|------|-------------|---------|
 | `MAILCOW_URL` | string | Your mailcow instance URL (without trailing slash) | `https://mail.example.com` |
-| `MAILCOW_API_KEY` | string | mailcow API key (generate from System → API in mailcow admin). Required permissions: Read access to logs | `abc123-def456-ghi789` |
+| `MAILCOW_API_KEY` | string | mailcow API key — **Read-Only** (generate from System → API in mailcow admin). Required permissions: Read access to logs | `abc123-def456-ghi789` |
 | `POSTGRES_USER` | string | PostgreSQL username | `mailcowlogs` |
 | `POSTGRES_PASSWORD` | string | PostgreSQL password. ⚠️ Avoid special chars (`@:/?#`) - breaks connection strings. 💡 Use UUID: `uuidgen` or https://it-tools.tech/uuid-generator | `a7f3c8e2-4b1d-4f9a-8c3e-7d2f1a9b5e4c` |
 | `POSTGRES_DB` | string | PostgreSQL database name | `mailcowlogs` |
@@ -34,6 +34,7 @@ These settings **must** be configured in your `.env` file:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
+| `MAILCOW_API_KEY_RW` | string | (empty) | mailcow API key — **Read-Write** (optional). Generate a separate key from System → API with write permissions. Used only for edit operations (e.g. Fail2Ban settings). When not set, edit features are disabled |
 | `MAILCOW_API_VERIFY_SSL` | boolean | `true` | Verify SSL certificates when connecting to mailcow API. Set to `false` for development environments with self-signed certificates |
 | `MAILCOW_API_TIMEOUT` | integer | `30` | API request timeout in seconds |
 
